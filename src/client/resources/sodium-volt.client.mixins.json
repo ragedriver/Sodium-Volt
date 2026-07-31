@@ -1,0 +1,45 @@
+{
+	"required": true,
+	"package": "com.ragedriver.sodiumvolt.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"ElderGuardianParticleGroupMixin",
+		"FilePackResourcesSupplierMixin",
+		"FramerateLimitTrackerMixin",
+		"GlDirectBufferVramMixin",
+		"GlTextureVramMixin",
+		"GpuResourceAccountingMixin",
+		"ItemPickupParticleGroupMixin",
+		"LevelExtractorBlockEntityMixin",
+		"MinecraftRenderMixin",
+		"MinecraftPrivacyScreenshotMixin",
+		"MinecraftResourceReloadMixin",
+		"OptionInstanceAccessor",
+		"ParticleEngineAccessor",
+		"ParticleGroupAccessor",
+		"ParticleEngineMixin",
+		"ParticleGroupTickMixin",
+		"ParticlePositionAccessor",
+		"PrivacyEntityRendererMixin",
+		"PrivacyHudMixin",
+		"PrivacyItemInHandMixin",
+		"PrivacyToastMixin",
+		"PathPackResourcesSupplierMixin",
+		"QuadParticleGroupMixin",
+		"ReloadableResourceManagerMixin",
+		"RenderRegionAccessor",
+		"RenderSectionManagerAttMixin",
+		"SpriteContentsAnimationStateAttMixin",
+		"TextureAtlasAccessor",
+		"TextureAtlasAnimationMixin",
+		"TextureAtlasSpriteAttMixin",
+		"VulkanDirectBufferVramMixin",
+		"VulkanTextureVramMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}

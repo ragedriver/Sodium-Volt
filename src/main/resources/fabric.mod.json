@@ -1,0 +1,41 @@
+{
+	"schemaVersion": 1,
+	"id": "sodium-volt",
+	"version": "${version}",
+	"name": "Sodium Volt",
+	"description": "Empowering sodium with the Volt features!",
+	"authors": [
+		"RAGEDRIVER"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/ragedriver/Sodium-Volt"
+	},
+	"license": "AGPL-3.0-only",
+	"icon": "assets/sodium-volt/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"main": [
+			"com.ragedriver.sodiumvolt.SodiumVolt"
+		],
+		"client": [
+			"com.ragedriver.sodiumvolt.client.SodiumVoltClient"
+		],
+		"sodium:config_api_user": [
+			"com.ragedriver.sodiumvolt.client.config.SodiumVoltConfigEntryPoint"
+		]
+	},
+	"mixins": [
+		{
+			"config": "sodium-volt.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*",
+		"sodium": ">=0.9.1 <0.10.0"
+	}
+}

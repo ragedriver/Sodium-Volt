@@ -1,0 +1,224 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+repositories {
+	maven {
+		name = "CaffeineMC"
+		url = "https://maven.caffeinemc.net/releases"
+	}
+}
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"sodium-volt" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+dependencies {
+	// To change the versions see the gradle.properties file
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Fabric API. This is technically optional, but you probably want it anyway.
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// Sodium is required by Sodium Volt and is loaded in the development client.
+	implementation "net.caffeinemc:sodium-fabric:${project.sodium_version}"
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+	// if it is present.
+	// If you remove this line, sources will not be generated.
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+sourceSets.test.compileClasspath += sourceSets.client.output
+sourceSets.test.runtimeClasspath += sourceSets.client.output
+
+tasks.register("voltGuardUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Sodium Volt's dependency-free runtime logic tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.guard.AdaptiveBudgetControllerTest"
+}
+
+tasks.register("voltInspectorUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Volt Inspector's dependency-free runtime logic tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.inspector.InspectorLogicTest"
+}
+
+tasks.register("voltPerformanceUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Adaptive Performance Controller's dependency-free logic tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.performance.ApcLogicTest"
+}
+
+tasks.register("vapsUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Visibility-Aware Particle Scheduler's dependency-free logic tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.performance.VapsLogicTest"
+}
+
+tasks.register("blockEntityBudgetUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Block Entity Render-budgeting's dependency-free logic tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.performance.BlockEntityBudgetLogicTest"
+}
+
+tasks.register("attUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Animated Texture Throttling's dependency-free policy tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.performance.AttLogicTest"
+}
+
+tasks.register("vramPressureUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs VRAM Pressure Protection's dependency-free accounting and controller tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.performance.VramPressureLogicTest"
+}
+
+tasks.register("smartFpsUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Smart FPS's dependency-free policy and normalization tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.smartfps.SmartFpsLogicTest"
+}
+
+tasks.register("voltRecoveryUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Volt Recovery's dependency-free state, ownership, and policy tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.recovery.RecoveryLogicTest"
+}
+
+tasks.register("gpuWatchdogUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs GPU Timeout Watchdog's dependency-free policy, lifecycle, and store tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.watchdog.GpuWatchdogLogicTest"
+}
+
+tasks.register("resourcePackShieldUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Resource-Pack Shield scanner, stream, policy, store, and scope tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.resourcepack.ResourcePackShieldLogicTest"
+}
+
+tasks.register("privacyScreenshotUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Privacy Screenshot Mode state, filename, and config tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.privacy.PrivacyScreenshotLogicTest"
+}
+
+tasks.register("profilesUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Profiles context, privacy, persistence, ownership, and factory-reset tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.profile.ProfilesLogicTest"
+}
+
+tasks.test {
+	dependsOn tasks.voltGuardUnitTest
+	dependsOn tasks.voltInspectorUnitTest
+	dependsOn tasks.voltPerformanceUnitTest
+	dependsOn tasks.vapsUnitTest
+	dependsOn tasks.blockEntityBudgetUnitTest
+	dependsOn tasks.attUnitTest
+	dependsOn tasks.vramPressureUnitTest
+	dependsOn tasks.smartFpsUnitTest
+	dependsOn tasks.voltRecoveryUnitTest
+	dependsOn tasks.gpuWatchdogUnitTest
+	dependsOn tasks.resourcePackShieldUnitTest
+	dependsOn tasks.privacyScreenshotUnitTest
+	dependsOn tasks.profilesUnitTest
+	failOnNoDiscoveredTests = false
+}
+
+tasks.check.dependsOn tasks.voltGuardUnitTest
+tasks.check.dependsOn tasks.voltInspectorUnitTest
+tasks.check.dependsOn tasks.voltPerformanceUnitTest
+tasks.check.dependsOn tasks.vapsUnitTest
+tasks.check.dependsOn tasks.blockEntityBudgetUnitTest
+tasks.check.dependsOn tasks.attUnitTest
+tasks.check.dependsOn tasks.vramPressureUnitTest
+tasks.check.dependsOn tasks.smartFpsUnitTest
+tasks.check.dependsOn tasks.voltRecoveryUnitTest
+tasks.check.dependsOn tasks.gpuWatchdogUnitTest
+tasks.check.dependsOn tasks.resourcePackShieldUnitTest
+tasks.check.dependsOn tasks.privacyScreenshotUnitTest
+tasks.check.dependsOn tasks.profilesUnitTest
+
+jar {
+	def projectName = project.name
+	inputs.property "projectName", projectName
+
+	from("LICENSE") {
+		rename { "${it}_$projectName"}
+	}
+}
+
+// configure the maven publication
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+		}
+	}
+
+	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+	repositories {
+		// Add repositories to publish to here.
+		// Notice: This block does NOT have the same function as the block in the top level.
+		// The repositories here will be used for publishing your artifact, not for
+		// retrieving dependencies.
+	}
+}
