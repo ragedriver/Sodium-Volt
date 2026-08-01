@@ -74,6 +74,15 @@ public final class VisibilityAwareParticleScheduler {
 			Frustum frustum,
 			Camera camera
 	) {
+		beginParticleExtraction(particleGroups, frustum, camera, false);
+	}
+
+	public static void beginParticleExtraction(
+			Map<ParticleRenderType, ParticleGroup<?>> particleGroups,
+			Frustum frustum,
+			Camera camera,
+			boolean prepareVoltGuardHandoff
+	) {
 		if (!isEnabled()) {
 			disableIfNeeded();
 			return;
@@ -82,7 +91,11 @@ public final class VisibilityAwareParticleScheduler {
 		schedulerActive = true;
 		FrameState frame = frameState();
 		try {
-			frame.begin();
+			frame.begin(
+					prepareVoltGuardHandoff,
+					particleCountFor(particleGroups, ParticleRenderType.SINGLE_QUADS),
+					particleCountFor(particleGroups, ParticleRenderType.ITEM_PICKUP)
+			);
 			Vec3 cameraPosition = camera.position();
 			Vector3fc forward = camera.forwardVector();
 			boolean prioritizeInFrustum = CONFIG.isVapsPrioritizeInFrustum();
@@ -95,15 +108,19 @@ public final class VisibilityAwareParticleScheduler {
 			int ambientLimit = CONFIG.getVapsAmbientPerCell();
 
 			particleGroups:
-			for (ParticleGroup<?> group : particleGroups.values()) {
+			for (Map.Entry<ParticleRenderType, ParticleGroup<?>> entry : particleGroups.entrySet()) {
+				ParticleRenderType renderType = entry.getKey();
+				ParticleGroup<?> group = entry.getValue();
 				Queue<Particle> particles = ((ParticleGroupAccessor) group).sodiumVolt$getParticles();
+				int sourceIndex = 0;
 				for (Particle particle : particles) {
+					int particleSourceIndex = sourceIndex++;
 					if (frame.scannedCount >= MAXIMUM_PARTICLES_SCANNED) {
 						frame.truncated = true;
 						break particleGroups;
 					}
 					frame.scannedCount++;
-					if (!frame.decisions.addScanned(particle)) {
+					if (!frame.addScanned(particle)) {
 						frame.truncated = true;
 						STATS.markSaturated();
 						break particleGroups;
@@ -122,7 +139,13 @@ public final class VisibilityAwareParticleScheduler {
 
 					boolean critical = visible && preserveCritical && isCriticalParticle(particle);
 					if (critical && frame.limiter.tryCritical(criticalReserve)) {
-						frame.decisions.select(particle);
+						selectParticleForFrame(
+								frame,
+								particle,
+								renderType,
+								visible,
+								particleSourceIndex
+						);
 						continue;
 					}
 					if (critical) {
@@ -165,7 +188,13 @@ public final class VisibilityAwareParticleScheduler {
 							continue;
 						}
 					}
-					frame.decisions.select(particle);
+					selectParticleForFrame(
+							frame,
+							particle,
+							renderType,
+							visible,
+							particleSourceIndex
+					);
 				}
 			}
 			if (frame.truncated) {
@@ -175,6 +204,11 @@ public final class VisibilityAwareParticleScheduler {
 				frame.saturated = true;
 				STATS.markSaturated();
 			}
+			if (frame.truncated) {
+				frame.abortGuardHandoff();
+			} else {
+				frame.completeGuardHandoff(frame.scannedCount);
+			}
 		} catch (RuntimeException | LinkageError exception) {
 			frame.disable();
 			if (!renderFailureLogged) {
@@ -182,6 +216,15 @@ public final class VisibilityAwareParticleScheduler {
 				SodiumVolt.LOGGER.warn("VAPS render scheduling failed open; vanilla extraction will continue", exception);
 			}
 		}
+	}
+
+	public static ParticleEligibilityHandoff<Particle> particleEligibilityHandoff() {
+		FrameState frame = frameState;
+		if (frame == null || !frame.active || frame.guardHandoff == null
+				|| !frame.guardHandoff.isComplete()) {
+			return null;
+		}
+		return frame.guardHandoff;
 	}
 
 	public static boolean shouldRenderParticle(Particle particle) {
@@ -335,6 +378,42 @@ public final class VisibilityAwareParticleScheduler {
 		return true;
 	}
 
+	private static int particleCountFor(
+			Map<ParticleRenderType, ParticleGroup<?>> particleGroups,
+			ParticleRenderType renderType
+	) {
+		ParticleGroup<?> group = particleGroups.get(renderType);
+		return group == null
+				? 0
+				: ((ParticleGroupAccessor) group).sodiumVolt$getParticles().size();
+	}
+
+	private static void selectParticleForFrame(
+			FrameState frame,
+			Particle particle,
+			ParticleRenderType renderType,
+			boolean visible,
+			int sourceIndex
+	) {
+		frame.decisions.select(particle);
+		if (frame.guardHandoff == null || !frame.guardHandoff.isRecording()) {
+			return;
+		}
+		if (renderType == ParticleRenderType.SINGLE_QUADS) {
+			if (visible && particle instanceof SingleQuadParticle) {
+				frame.guardHandoff.add(particle, false, sourceIndex);
+			}
+		} else if (renderType == ParticleRenderType.ITEM_PICKUP) {
+			frame.guardHandoff.add(particle, true, frame.quadSourceCount + sourceIndex);
+		} else if (renderType == ParticleRenderType.ELDER_GUARDIANS) {
+			frame.guardHandoff.add(
+					particle,
+					true,
+					frame.quadSourceCount + frame.itemPickupSourceCount + sourceIndex
+			);
+		}
+	}
+
 	private static boolean isCriticalParticle(Particle particle) {
 		return particle instanceof AttackSweepParticle
 				|| particle instanceof ItemPickupParticle
@@ -401,19 +480,62 @@ public final class VisibilityAwareParticleScheduler {
 		private boolean truncated;
 		private boolean saturated;
 		private int scannedCount;
+		private ParticleEligibilityHandoff<Particle> guardHandoff;
+		private int quadSourceCount;
+		private int itemPickupSourceCount;
 
-		private void begin() {
+		private void begin(
+				boolean prepareGuardHandoff,
+				int quadSourceCount,
+				int itemPickupSourceCount
+		) {
 			this.decisions.nextFrame();
 			this.limiter.reset();
 			this.active = true;
 			this.truncated = false;
 			this.saturated = false;
 			this.scannedCount = 0;
+			this.quadSourceCount = quadSourceCount;
+			this.itemPickupSourceCount = itemPickupSourceCount;
+			if (prepareGuardHandoff) {
+				if (this.guardHandoff == null) {
+					this.guardHandoff = new ParticleEligibilityHandoff<>(MAXIMUM_PARTICLES_SCANNED);
+				}
+				this.guardHandoff.begin();
+			} else if (this.guardHandoff != null) {
+				this.guardHandoff.abort();
+			}
+		}
+
+		private void completeGuardHandoff(int rawSourceVisits) {
+			if (this.guardHandoff != null) {
+				this.guardHandoff.complete(rawSourceVisits);
+			}
+		}
+
+		private boolean addScanned(Particle particle) {
+			if (this.guardHandoff == null || !this.guardHandoff.isRecording()) {
+				return this.decisions.addScanned(particle);
+			}
+			VapsIdentityDecisionTable.AddResult result = this.decisions.addScannedResult(particle);
+			if (result == VapsIdentityDecisionTable.AddResult.EXISTING) {
+				// A later occurrence can retroactively select an earlier one.
+				// Preserve exact identity semantics through Guard's raw fallback.
+				this.abortGuardHandoff();
+			}
+			return result != VapsIdentityDecisionTable.AddResult.SATURATED;
+		}
+
+		private void abortGuardHandoff() {
+			if (this.guardHandoff != null) {
+				this.guardHandoff.abort();
+			}
 		}
 
 		private void end() {
 			this.active = false;
 			this.decisions.releaseFrame();
+			this.abortGuardHandoff();
 		}
 
 		private void disable() {
@@ -422,6 +544,9 @@ public final class VisibilityAwareParticleScheduler {
 			this.scannedCount = 0;
 			this.truncated = false;
 			this.saturated = false;
+			this.quadSourceCount = 0;
+			this.itemPickupSourceCount = 0;
+			this.abortGuardHandoff();
 		}
 	}
 

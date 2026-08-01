@@ -36,14 +36,49 @@ dependencies {
 	implementation "net.caffeinemc:sodium-fabric:${project.sodium_version}"
 }
 
+dependencyLocking {
+	lockAllConfigurations()
+	lockMode = LockMode.STRICT
+}
+
+// Fabric Loader ignores SemVer build metadata in dependency comparisons. The
+// separate Minecraft dependency constrains the compatible game version.
+def fabricApiMinimumVersion = project.fabric_api_version.split('\\+', 2)[0]
+def expectedModVersion = project.version.toString()
+def expectedFabricApiPredicate = ">=${fabricApiMinimumVersion}".toString()
+
 processResources {
-	def version = project.version
-	inputs.property "version", version
+	inputs.property "version", expectedModVersion
+	inputs.property "fabricApiMinimumVersion", fabricApiMinimumVersion
 
 	filesMatching("fabric.mod.json") {
-		expand "version": version
+		expand "version": expectedModVersion, "fabricApiMinimumVersion": fabricApiMinimumVersion
 	}
 }
+
+def processedFabricMod = layout.buildDirectory.file("resources/main/fabric.mod.json")
+
+tasks.register("verifyFabricModMetadata") {
+	group = "verification"
+	description = "Verifies generated Fabric dependency metadata."
+	dependsOn tasks.processResources
+	inputs.file processedFabricMod
+	inputs.property "expectedModVersion", expectedModVersion
+	inputs.property "expectedFabricApiPredicate", expectedFabricApiPredicate
+
+	doLast {
+		def metadata = new groovy.json.JsonSlurper().parse(processedFabricMod.get().asFile)
+
+		if (metadata.version != expectedModVersion) {
+			throw new GradleException("fabric.mod.json version '${metadata.version}' does not match '${expectedModVersion}'")
+		}
+		if (metadata.depends?.get("fabric-api") != expectedFabricApiPredicate) {
+			throw new GradleException("fabric.mod.json fabric-api dependency '${metadata.depends?.get("fabric-api")}' does not match '${expectedFabricApiPredicate}'")
+		}
+	}
+}
+
+tasks.check.dependsOn tasks.verifyFabricModMetadata
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25

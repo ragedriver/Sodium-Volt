@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,7 +21,9 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -43,6 +46,11 @@ public final class ResourcePackShieldLogicTest {
 		testReloadContextPairing();
 		testAggregateScanBudget();
 		testLiveStreamAccountingAndClose();
+		testLiveStreamBulkFastPaths();
+		testLiveStreamValidationBoundaries();
+		testLiveStreamSkipLimitsAndProgress();
+		testConcurrentLiveReadReservations();
+		testInvalidDirectSkipCounts();
 		testArchiveOpenGateConcurrency();
 		testSanitizedReport();
 		testSourceScope();
@@ -683,6 +691,487 @@ public final class ResourcePackShieldLogicTest {
 		badJson.close();
 	}
 
+	private static void testLiveStreamBulkFastPaths() throws Exception {
+		byte[] otherBytes = new byte[256 * 1_024];
+		Arrays.fill(otherBytes, (byte) 0x5A);
+		InstrumentedInputStream otherRaw = new InstrumentedInputStream(otherBytes);
+		ShieldReadBudget otherBudget = new ShieldReadBudget(otherBytes.length);
+		ShieldedInputStream other = new ShieldedInputStream(
+				otherRaw,
+				otherBytes.length,
+				otherBudget,
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		);
+		check(!other.contentInspectionPending(),
+				"OTHER begins in the no-inspection fast-path state");
+		byte[] destination = new byte[otherBytes.length];
+		check(other.read(destination) == destination.length
+						&& otherRaw.bulkReadCalls == 1
+						&& otherRaw.singleReadCalls == 0
+						&& other.resourceBytes() == destination.length
+						&& otherBudget.consumedBytes() == destination.length,
+				"large OTHER resource stays on one bulk accounted read");
+		other.close();
+
+		byte[] pngBytes = new byte[128 * 1_024];
+		System.arraycopy(png(64, 64), 0, pngBytes, 0, 24);
+		Arrays.fill(pngBytes, 24, pngBytes.length, (byte) 0x33);
+		InstrumentedInputStream pngRaw = new InstrumentedInputStream(pngBytes);
+		ShieldReadBudget pngBudget = new ShieldReadBudget(pngBytes.length);
+		ShieldedInputStream pngStream = new ShieldedInputStream(
+				pngRaw,
+				pngBytes.length,
+				pngBudget,
+				ShieldedInputStream.ContentKind.PNG,
+				policy(true),
+				reason -> true
+		);
+		check(pngStream.contentInspectionPending(),
+				"PNG begins with prefix inspection pending");
+		check(pngStream.skip(pngBytes.length) == pngBytes.length
+						&& pngRaw.bulkReadBytes == 24
+						&& pngRaw.skippedBytes == pngBytes.length - 24L
+						&& pngRaw.singleReadCalls == 0
+						&& pngStream.resourceBytes() == pngBytes.length
+						&& pngBudget.consumedBytes() == pngBytes.length
+						&& !pngStream.contentInspectionPending(),
+				"PNG skip validates only its 24-byte prefix and directly skips the tail");
+		pngStream.close();
+
+		InstrumentedInputStream otherSkipRaw = new InstrumentedInputStream(otherBytes);
+		ShieldedInputStream otherSkip = new ShieldedInputStream(
+				otherSkipRaw,
+				otherBytes.length,
+				new ShieldReadBudget(otherBytes.length),
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		);
+		check(otherSkip.skip(otherBytes.length) == otherBytes.length
+						&& otherSkipRaw.bulkReadCalls == 0
+						&& otherSkipRaw.singleReadCalls == 0
+						&& otherSkipRaw.skippedBytes == otherBytes.length,
+				"OTHER skip bypasses the read-and-inspect path entirely");
+		otherSkip.close();
+	}
+
+	private static void testLiveStreamValidationBoundaries() throws Exception {
+		byte[] validPng = png(128, 64);
+		AtomicInteger pngFailures = new AtomicInteger();
+		ShieldedInputStream splitPng = new ShieldedInputStream(
+				new ByteArrayInputStream(validPng),
+				validPng.length,
+				new ShieldReadBudget(validPng.length),
+				ShieldedInputStream.ContentKind.PNG,
+				policy(true),
+				reason -> {
+					pngFailures.incrementAndGet();
+					return true;
+				}
+		);
+		byte[] pngChunk = new byte[24];
+		check(splitPng.read(pngChunk, 0, 5) == 5
+						&& splitPng.read(pngChunk, 5, 7) == 7
+						&& splitPng.read(pngChunk, 12, 12) == 12
+						&& splitPng.read() == -1
+						&& pngFailures.get() == 0,
+				"PNG prefix validation survives arbitrary bulk boundaries");
+		splitPng.close();
+
+		byte[] invalidPng = validPng.clone();
+		invalidPng[7] ^= 1;
+		AtomicInteger invalidPngFailures = new AtomicInteger();
+		ShieldedInputStream rejectedPng = new ShieldedInputStream(
+				new ChunkedInputStream(invalidPng, 5),
+				invalidPng.length,
+				new ShieldReadBudget(invalidPng.length),
+				ShieldedInputStream.ContentKind.PNG,
+				policy(true),
+				reason -> {
+					check(reason == ShieldReason.PNG_HEADER, "split PNG rejection reason");
+					invalidPngFailures.incrementAndGet();
+					return true;
+				}
+		);
+		try {
+			rejectedPng.readNBytes(24);
+			throw new AssertionError("invalid split PNG must fail closed");
+		} catch (IOException expected) {
+			check(invalidPngFailures.get() == 1, "invalid PNG reports once");
+		}
+		rejectedPng.close();
+
+		byte[] validJson = "{\"text\":\"[\\\\\\\"]\",\"items\":[{},[]]}".getBytes(
+				StandardCharsets.UTF_8
+		);
+		AtomicInteger jsonFailures = new AtomicInteger();
+		ShieldedInputStream chunkedJson = new ShieldedInputStream(
+				new ChunkedInputStream(validJson, 3),
+				validJson.length,
+				new ShieldReadBudget(validJson.length),
+				ShieldedInputStream.ContentKind.JSON,
+				policy(true),
+				reason -> {
+					jsonFailures.incrementAndGet();
+					return true;
+				}
+		);
+		byte[] jsonChunk = new byte[11];
+		while (chunkedJson.read(jsonChunk) >= 0) {
+			// Consume all chunks so EOF finalizes the lexical state.
+		}
+		check(jsonFailures.get() == 0 && !chunkedJson.contentInspectionPending(),
+				"valid JSON survives chunks and reaches a finalized fast-path state");
+		chunkedJson.close();
+
+		byte[] unfinishedJson = "{\"text\":\"unfinished".getBytes(StandardCharsets.UTF_8);
+		AtomicInteger unfinishedFailures = new AtomicInteger();
+		ShieldedInputStream singleByteJson = new ShieldedInputStream(
+				new ByteArrayInputStream(unfinishedJson),
+				unfinishedJson.length,
+				new ShieldReadBudget(unfinishedJson.length),
+				ShieldedInputStream.ContentKind.JSON,
+				policy(true),
+				reason -> {
+					check(reason == ShieldReason.JSON_NESTING,
+							"single-byte JSON EOF rejection reason");
+					unfinishedFailures.incrementAndGet();
+					return true;
+				}
+		);
+		try {
+			while (singleByteJson.read() >= 0) {
+				// Deliberately exercise the single-byte lexical state machine.
+			}
+			throw new AssertionError("unfinished single-byte JSON must fail at EOF");
+		} catch (IOException expected) {
+			check(unfinishedFailures.get() == 1,
+					"single-byte JSON keeps state through EOF finalization");
+		}
+		singleByteJson.close();
+
+		byte[] invalidJson = "{\"items\":[1,2}".getBytes(StandardCharsets.UTF_8);
+		AtomicInteger invalidJsonFailures = new AtomicInteger();
+		ShieldedInputStream skippedJson = new ShieldedInputStream(
+				new ChunkedInputStream(invalidJson, 2),
+				invalidJson.length,
+				new ShieldReadBudget(invalidJson.length),
+				ShieldedInputStream.ContentKind.JSON,
+				policy(true),
+				reason -> {
+					check(reason == ShieldReason.JSON_NESTING, "skipped JSON rejection reason");
+					invalidJsonFailures.incrementAndGet();
+					return true;
+				}
+		);
+		try {
+			skippedJson.skip(invalidJson.length);
+			throw new AssertionError("invalid skipped JSON must fail closed");
+		} catch (IOException expected) {
+			check(invalidJsonFailures.get() == 1,
+					"JSON skip validates every chunk and reports once");
+		}
+		skippedJson.close();
+
+		BufferCapturingInputStream captureRaw = new BufferCapturingInputStream(
+				"{}  ".getBytes(StandardCharsets.UTF_8)
+		);
+		ShieldedInputStream reusable = new ShieldedInputStream(
+				captureRaw,
+				4,
+				new ShieldReadBudget(4),
+				ShieldedInputStream.ContentKind.JSON,
+				policy(true),
+				reason -> true
+		);
+		check(reusable.skip(2) == 2 && reusable.skip(2) == 2 && reusable.read() == -1,
+				"valid JSON can be consumed through repeated skips");
+		check(captureRaw.firstBuffer != null
+						&& captureRaw.firstBuffer == captureRaw.lastBuffer
+						&& allZero(captureRaw.lastBuffer),
+				"JSON skips reuse one cleared bounded buffer");
+		reusable.close();
+	}
+
+	private static void testLiveStreamSkipLimitsAndProgress() throws Exception {
+		InstrumentedInputStream rejectRaw = new InstrumentedInputStream(new byte[32]);
+		ShieldReadBudget rejectBudget = new ShieldReadBudget(4);
+		ShieldedInputStream reject = new ShieldedInputStream(
+				rejectRaw,
+				4,
+				rejectBudget,
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		);
+		try {
+			reject.skip(32);
+			throw new AssertionError("direct skip must enforce the live-read ceiling");
+		} catch (IOException expected) {
+			check(rejectRaw.skippedBytes == 5
+							&& reject.resourceBytes() == 4
+							&& rejectBudget.consumedBytes() == 4,
+					"direct skip permits only the ceiling plus one detection byte");
+		}
+		reject.close();
+
+		AtomicInteger monitored = new AtomicInteger();
+		InstrumentedInputStream monitorRaw = new InstrumentedInputStream(new byte[32]);
+		ShieldedInputStream monitor = new ShieldedInputStream(
+				monitorRaw,
+				4,
+				new ShieldReadBudget(4),
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(false),
+				reason -> {
+					monitored.incrementAndGet();
+					return false;
+				}
+		);
+		check(monitor.skip(32) == 32
+						&& monitorRaw.skippedBytes == 32
+						&& monitor.resourceBytes() == 4
+						&& monitored.get() == 1,
+				"monitor-only direct skip accounts, reports once, and preserves progress");
+		monitor.close();
+
+		ZeroProgressInputStream zeroOtherRaw = new ZeroProgressInputStream(
+				new byte[]{1, 2, 3, 4}
+		);
+		ShieldedInputStream zeroOther = new ShieldedInputStream(
+				zeroOtherRaw,
+				4,
+				new ShieldReadBudget(4),
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		);
+		check(zeroOther.skip(4) == 4
+						&& zeroOtherRaw.skipCalls == 4
+						&& zeroOtherRaw.singleReadCalls == 4,
+				"zero-progress direct skip falls back to bounded single-byte progress");
+		zeroOther.close();
+
+		byte[] zeroJsonBytes = "{\"a\":[]}".getBytes(StandardCharsets.UTF_8);
+		ZeroProgressInputStream zeroJsonRaw = new ZeroProgressInputStream(zeroJsonBytes);
+		ShieldedInputStream zeroJson = new ShieldedInputStream(
+				zeroJsonRaw,
+				zeroJsonBytes.length,
+				new ShieldReadBudget(zeroJsonBytes.length),
+				ShieldedInputStream.ContentKind.JSON,
+				policy(true),
+				reason -> true
+		);
+		check(zeroJson.skip(zeroJsonBytes.length) == zeroJsonBytes.length
+						&& zeroJson.read() == -1
+						&& zeroJsonRaw.bulkReadCalls == zeroJsonBytes.length
+						&& zeroJsonRaw.singleReadCalls == zeroJsonBytes.length + 1,
+				"zero-progress JSON reads cannot bypass validation or spin");
+		zeroJson.close();
+		try {
+			zeroJson.read();
+			throw new AssertionError("closed shield stream must reject reads");
+		} catch (IOException expected) {
+			// Expected lifecycle enforcement.
+		}
+	}
+
+	private static void testConcurrentLiveReadReservations() throws Exception {
+		ShieldReadBudget reuseBudget = new ShieldReadBudget(2);
+		ShieldReadBudget.Reservation reusableToken = reuseBudget.newReservation();
+		check(reusableToken.acquire(1) == reusableToken,
+				"reservation acquisition reuses its per-stream token");
+		try {
+			reusableToken.acquire(1);
+			throw new AssertionError("active reservation token must reject nested acquisition");
+		} catch (IllegalStateException expected) {
+			// Expected protection against overlapping use of one stream token.
+		}
+		reusableToken.close();
+		check(reusableToken.acquire(1) == reusableToken && reusableToken.commit(1),
+				"released reservation token can be reused without allocation");
+		reusableToken.close();
+
+		ShieldReadBudget shared = new ShieldReadBudget(8);
+		CountDownLatch entered = new CountDownLatch(2);
+		CountDownLatch release = new CountDownLatch(1);
+		BlockingSkipInputStream shortRaw = new BlockingSkipInputStream(2, entered, release);
+		BlockingSkipInputStream fullRaw = new BlockingSkipInputStream(4, entered, release);
+		ShieldedInputStream shortStream = new ShieldedInputStream(
+				shortRaw, 8, shared, ShieldedInputStream.ContentKind.OTHER,
+				policy(true), reason -> true
+		);
+		ShieldedInputStream fullStream = new ShieldedInputStream(
+				fullRaw, 8, shared, ShieldedInputStream.ContentKind.OTHER,
+				policy(true), reason -> true
+		);
+		long[] results = new long[2];
+		AtomicReference<Throwable> concurrentFailure = new AtomicReference<>();
+		Thread shortThread = new Thread(() -> {
+			try {
+				results[0] = shortStream.skip(4);
+			} catch (Throwable throwable) {
+				concurrentFailure.compareAndSet(null, throwable);
+			}
+		}, "shield-short-reservation-test");
+		Thread fullThread = new Thread(() -> {
+			try {
+				results[1] = fullStream.skip(4);
+			} catch (Throwable throwable) {
+				concurrentFailure.compareAndSet(null, throwable);
+			}
+		}, "shield-full-reservation-test");
+		shortThread.start();
+		fullThread.start();
+		check(entered.await(5, TimeUnit.SECONDS),
+				"disjoint aggregate reservations perform delegate I/O concurrently");
+		check(shared.consumedBytes() == 0 && shared.remainingBytes() == 0,
+				"in-flight reservations cannot be claimed by another stream");
+		release.countDown();
+		join(shortThread, "short aggregate reservation");
+		join(fullThread, "full aggregate reservation");
+		if (concurrentFailure.get() != null) {
+			throw new AssertionError("concurrent aggregate reservation failed",
+					concurrentFailure.get());
+		}
+		check(results[0] == 2 && results[1] == 4
+						&& shared.consumedBytes() == 6
+						&& shared.remainingBytes() == 2,
+				"short delegate progress refunds unused aggregate allowance");
+		ShieldedInputStream refundConsumer = new ShieldedInputStream(
+				new ByteArrayInputStream(new byte[2]),
+				2,
+				shared,
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		);
+		check(refundConsumer.skip(2) == 2 && shared.consumedBytes() == 8,
+				"refunded reservation capacity remains usable");
+		shortStream.close();
+		fullStream.close();
+		refundConsumer.close();
+
+		ShieldReadBudget zeroBudget = new ShieldReadBudget(4);
+		ShieldedInputStream empty = new ShieldedInputStream(
+				InputStream.nullInputStream(),
+				4,
+				zeroBudget,
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		);
+		check(empty.skip(4) == 0
+						&& zeroBudget.consumedBytes() == 0
+						&& zeroBudget.remainingBytes() == 4,
+				"zero-progress delegate releases its full reservation");
+		ShieldedInputStream afterEmpty = new ShieldedInputStream(
+				new ByteArrayInputStream(new byte[4]),
+				4,
+				zeroBudget,
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		);
+		check(afterEmpty.skip(4) == 4 && zeroBudget.consumedBytes() == 4,
+				"zero-progress reservation does not permanently consume capacity");
+		empty.close();
+		afterEmpty.close();
+
+		ShieldReadBudget ceiling = new ShieldReadBudget(4);
+		InstrumentedInputStream firstRaw = new InstrumentedInputStream(new byte[4]);
+		InstrumentedInputStream secondRaw = new InstrumentedInputStream(new byte[4]);
+		AtomicInteger completed = new AtomicInteger();
+		AtomicInteger rejected = new AtomicInteger();
+		AtomicInteger violations = new AtomicInteger();
+		AtomicReference<Throwable> raceFailure = new AtomicReference<>();
+		ShieldedInputStream first = new ShieldedInputStream(
+				firstRaw, 8, ceiling, ShieldedInputStream.ContentKind.OTHER,
+				policy(true), reason -> {
+					check(reason == ShieldReason.LIVE_READ_LIMIT,
+							"concurrent aggregate detection reason");
+					violations.incrementAndGet();
+					return true;
+				}
+		);
+		ShieldedInputStream second = new ShieldedInputStream(
+				secondRaw, 8, ceiling, ShieldedInputStream.ContentKind.OTHER,
+				policy(true), reason -> {
+					check(reason == ShieldReason.LIVE_READ_LIMIT,
+							"concurrent aggregate detection reason");
+					violations.incrementAndGet();
+					return true;
+				}
+		);
+		CountDownLatch start = new CountDownLatch(1);
+		Thread firstRace = concurrentSkipThread(
+				first, start, completed, rejected, raceFailure, "shield-budget-race-a"
+		);
+		Thread secondRace = concurrentSkipThread(
+				second, start, completed, rejected, raceFailure, "shield-budget-race-b"
+		);
+		firstRace.start();
+		secondRace.start();
+		start.countDown();
+		join(firstRace, "first aggregate ceiling racer");
+		join(secondRace, "second aggregate ceiling racer");
+		if (raceFailure.get() != null) {
+			throw new AssertionError("aggregate ceiling race failed", raceFailure.get());
+		}
+		check(completed.get() == 1
+						&& rejected.get() == 1
+						&& violations.get() == 1
+						&& ceiling.consumedBytes() == 4
+						&& firstRaw.skippedBytes + secondRaw.skippedBytes == 5
+						&& first.resourceBytes() + second.resourceBytes() == 5,
+				"parallel streams share one exclusive aggregate detection byte");
+		first.close();
+		second.close();
+	}
+
+	private static void testInvalidDirectSkipCounts() throws Exception {
+		for (boolean oversized : new boolean[]{false, true}) {
+			ShieldReadBudget budget = new ShieldReadBudget(4);
+			InvalidSkipInputStream invalidRaw = new InvalidSkipInputStream(oversized);
+			ShieldedInputStream invalid = new ShieldedInputStream(
+					invalidRaw,
+					4,
+					budget,
+					ShieldedInputStream.ContentKind.OTHER,
+					policy(true),
+					reason -> true
+			);
+			try {
+				invalid.skip(4);
+				throw new AssertionError("invalid delegate skip count must fail closed");
+			} catch (IOException expected) {
+				check(budget.consumedBytes() == 0 && budget.remainingBytes() == 4,
+						"invalid skip count releases its aggregate reservation");
+			}
+			try {
+				invalid.read();
+				throw new AssertionError("invalid skip count must permanently reject stream");
+			} catch (IOException expected) {
+				// Expected fail-closed stream state.
+			}
+
+			ShieldedInputStream recovery = new ShieldedInputStream(
+					new ByteArrayInputStream(new byte[4]),
+					4,
+					budget,
+					ShieldedInputStream.ContentKind.OTHER,
+					policy(true),
+					reason -> true
+			);
+			check(recovery.skip(4) == 4 && budget.consumedBytes() == 4,
+					"another stream can use allowance released after invalid skip count");
+			invalid.close();
+			recovery.close();
+		}
+	}
+
 	private static void testAggregateScanBudget() {
 		ResourcePackShieldPolicy policy = policy(true);
 		ShieldScanBudget.Allowance remaining = ShieldScanBudget.allowance(
@@ -939,6 +1428,186 @@ public final class ResourcePackShieldLogicTest {
 	private static void check(boolean condition, String message) {
 		if (!condition) {
 			throw new AssertionError("Resource-Pack Shield: " + message);
+		}
+	}
+
+	private static Thread concurrentSkipThread(
+			ShieldedInputStream stream,
+			CountDownLatch start,
+			AtomicInteger completed,
+			AtomicInteger rejected,
+			AtomicReference<Throwable> failure,
+			String name
+	) {
+		return new Thread(() -> {
+			try {
+				start.await();
+				stream.skip(4);
+				completed.incrementAndGet();
+			} catch (IOException expected) {
+				rejected.incrementAndGet();
+			} catch (Throwable throwable) {
+				failure.compareAndSet(null, throwable);
+			}
+		}, name);
+	}
+
+	private static void join(Thread thread, String description) throws InterruptedException {
+		thread.join(5_000L);
+		check(!thread.isAlive(), description + " must not deadlock");
+	}
+
+	private static boolean allZero(byte[] bytes) {
+		for (byte value : bytes) {
+			if (value != 0) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static class InstrumentedInputStream extends ByteArrayInputStream {
+		int bulkReadCalls;
+		int singleReadCalls;
+		int skipCalls;
+		long bulkReadBytes;
+		long skippedBytes;
+
+		private InstrumentedInputStream(byte[] bytes) {
+			super(bytes);
+		}
+
+		@Override
+		public synchronized int read() {
+			this.singleReadCalls++;
+			return super.read();
+		}
+
+		@Override
+		public synchronized int read(byte[] bytes, int offset, int length) {
+			this.bulkReadCalls++;
+			int read = super.read(bytes, offset, length);
+			if (read > 0) {
+				this.bulkReadBytes += read;
+			}
+			return read;
+		}
+
+		@Override
+		public synchronized long skip(long amount) {
+			this.skipCalls++;
+			long skipped = super.skip(amount);
+			this.skippedBytes += skipped;
+			return skipped;
+		}
+	}
+
+	private static final class ChunkedInputStream extends ByteArrayInputStream {
+		private final int maximumChunk;
+
+		private ChunkedInputStream(byte[] bytes, int maximumChunk) {
+			super(bytes);
+			this.maximumChunk = maximumChunk;
+		}
+
+		@Override
+		public synchronized int read(byte[] bytes, int offset, int length) {
+			return super.read(bytes, offset, Math.min(length, this.maximumChunk));
+		}
+	}
+
+	private static final class BufferCapturingInputStream extends ByteArrayInputStream {
+		private byte[] firstBuffer;
+		private byte[] lastBuffer;
+
+		private BufferCapturingInputStream(byte[] bytes) {
+			super(bytes);
+		}
+
+		@Override
+		public synchronized int read(byte[] bytes, int offset, int length) {
+			if (this.firstBuffer == null) {
+				this.firstBuffer = bytes;
+			}
+			this.lastBuffer = bytes;
+			return super.read(bytes, offset, length);
+		}
+	}
+
+	private static final class ZeroProgressInputStream extends InstrumentedInputStream {
+		private ZeroProgressInputStream(byte[] bytes) {
+			super(bytes);
+		}
+
+		@Override
+		public synchronized int read(byte[] bytes, int offset, int length) {
+			this.bulkReadCalls++;
+			return 0;
+		}
+
+		@Override
+		public synchronized long skip(long amount) {
+			this.skipCalls++;
+			return 0L;
+		}
+	}
+
+	private static final class BlockingSkipInputStream extends InputStream {
+		private final CountDownLatch entered;
+		private final CountDownLatch release;
+		private int remaining;
+
+		private BlockingSkipInputStream(
+				int bytes,
+				CountDownLatch entered,
+				CountDownLatch release
+		) {
+			this.remaining = bytes;
+			this.entered = entered;
+			this.release = release;
+		}
+
+		@Override
+		public int read() {
+			if (this.remaining <= 0) {
+				return -1;
+			}
+			this.remaining--;
+			return 0;
+		}
+
+		@Override
+		public long skip(long amount) throws IOException {
+			this.entered.countDown();
+			try {
+				if (!this.release.await(5, TimeUnit.SECONDS)) {
+					throw new IOException("Timed out waiting for concurrent skip test");
+				}
+			} catch (InterruptedException exception) {
+				Thread.currentThread().interrupt();
+				throw new IOException("Concurrent skip test interrupted", exception);
+			}
+			int skipped = (int) Math.min(amount, this.remaining);
+			this.remaining -= skipped;
+			return skipped;
+		}
+	}
+
+	private static final class InvalidSkipInputStream extends InputStream {
+		private final boolean oversized;
+
+		private InvalidSkipInputStream(boolean oversized) {
+			this.oversized = oversized;
+		}
+
+		@Override
+		public int read() {
+			return -1;
+		}
+
+		@Override
+		public long skip(long amount) {
+			return this.oversized ? amount + 1L : -1L;
 		}
 	}
 

@@ -13,6 +13,8 @@ public final class VapsLogicTest {
 		testPerTypeQuota();
 		testAmbientCellQuota();
 		testIdentityDecisionFrames();
+		testGuardEligibilityHandoffEliminatesRawRescans();
+		testGuardEligibilityHandoffFailureLifecycle();
 		testSaturatingStatistics();
 		System.out.println("VAPS logic tests passed");
 	}
@@ -89,8 +91,11 @@ public final class VapsLogicTest {
 		Object selected = new Object();
 		Object suppressed = new Object();
 		decisions.nextFrame();
-		check(decisions.addScanned(selected) && decisions.addScanned(suppressed),
+		check(decisions.addScannedResult(selected) == VapsIdentityDecisionTable.AddResult.INSERTED
+					&& decisions.addScanned(suppressed),
 				"bounded identity decisions must accept normal frame entries");
+		check(decisions.addScannedResult(suppressed) == VapsIdentityDecisionTable.AddResult.EXISTING,
+				"duplicate identities must be detectable without a second table lookup");
 		decisions.select(selected);
 		check(decisions.isSelected(selected), "selected identity must be retained");
 		check(decisions.isScanned(suppressed) && !decisions.isSelected(suppressed),
@@ -142,6 +147,67 @@ public final class VapsLogicTest {
 				"statistics must saturate rather than overflow");
 		check(VapsDecisionLogic.saturatingAdd(7L, -4L) == 7L,
 				"invalid negative increments must not reduce counters");
+	}
+
+	private static void testGuardEligibilityHandoffEliminatesRawRescans() {
+		ParticleEligibilityHandoff<Object> handoff = new ParticleEligibilityHandoff<>(8);
+		Object quad = new Object();
+		Object itemPickup = new Object();
+		Object elderGuardian = new Object();
+		handoff.begin();
+		check(handoff.add(quad, false, 1), "visible VAPS-approved quads must enter the shared plan");
+		check(handoff.add(itemPickup, true, 3), "item-pickup candidates must retain special priority");
+		check(handoff.add(elderGuardian, true, 5), "guardian candidates must retain special priority");
+		handoff.complete(6);
+
+		int legacyOverloadedRawVisits = 6 + 6 + 4 + 6;
+		check(handoff.rawSourceVisitsForTesting() == 6 && legacyOverloadedRawVisits == 22,
+				"combined scheduling must use one six-particle raw scan instead of 22 VAPS/Guard raw visits");
+		check(handoff.candidateCount() == 3 && handoff.specialCount() == 2,
+				"the shared plan must contain only VAPS-approved, Guard-relevant candidates");
+		check(handoff.candidateAt(0) == quad && handoff.originalIndexAt(0) == 1
+					&& !handoff.isSpecial(0),
+				"quad identity and vanilla source order must remain exact");
+		check(handoff.candidateAt(1) == itemPickup && handoff.originalIndexAt(1) == 3
+					&& handoff.isSpecial(1)
+					&& handoff.candidateAt(2) == elderGuardian
+					&& handoff.originalIndexAt(2) == 5,
+				"special groups must preserve item-before-guardian source indices");
+
+		handoff.abort();
+		check(!handoff.isComplete()
+					&& !handoff.retainsReferenceForTesting(quad)
+					&& !handoff.retainsReferenceForTesting(itemPickup)
+					&& !handoff.retainsReferenceForTesting(elderGuardian),
+				"extraction end must explicitly release every handed-off game object");
+	}
+
+	private static void testGuardEligibilityHandoffFailureLifecycle() {
+		ParticleEligibilityHandoff<Object> handoff = new ParticleEligibilityHandoff<>(2);
+		Object first = new Object();
+		Object second = new Object();
+		Object overflow = new Object();
+		check(!handoff.isComplete(), "a disabled or unstarted handoff must force Guard's standalone path");
+
+		handoff.begin();
+		check(handoff.add(first, false, 0) && handoff.add(second, true, 1),
+				"a bounded plan must accept candidates up to capacity");
+		check(!handoff.add(overflow, false, 2),
+				"capacity saturation must invalidate the handoff instead of returning partial decisions");
+		check(!handoff.isComplete()
+					&& handoff.candidateCount() == 0
+					&& !handoff.retainsReferenceForTesting(first)
+					&& !handoff.retainsReferenceForTesting(second),
+				"saturation must clear references and make Volt Guard fall back to its raw scan");
+
+		handoff.begin();
+		check(handoff.add(overflow, false, 0), "the fixed buffer must be reusable after an aborted frame");
+		handoff.complete(1);
+		check(handoff.isComplete() && handoff.candidateAt(0) == overflow,
+				"a later healthy frame must publish a complete handoff");
+		handoff.abort();
+		check(!handoff.retainsReferenceForTesting(overflow),
+				"failure and lifecycle aborts must release later-frame identities too");
 	}
 
 	private static void check(boolean condition, String message) {

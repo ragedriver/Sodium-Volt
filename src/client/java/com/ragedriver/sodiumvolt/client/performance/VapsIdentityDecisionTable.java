@@ -37,6 +37,10 @@ final class VapsIdentityDecisionTable<T> {
 	}
 
 	boolean addScanned(T value) {
+		return this.addScannedResult(value) != AddResult.SATURATED;
+	}
+
+	AddResult addScannedResult(T value) {
 		int index = mix(System.identityHashCode(value)) & this.mask;
 		for (int probe = 0; probe < MAX_PROBES; probe++) {
 			if (this.generations[index] != this.generation) {
@@ -44,14 +48,14 @@ final class VapsIdentityDecisionTable<T> {
 				this.keys[index] = value;
 				this.decisions[index] = SCANNED;
 				this.occupiedSlots[this.occupiedCount++] = index;
-				return true;
+				return AddResult.INSERTED;
 			}
 			if (this.keys[index] == value) {
-				return true;
+				return AddResult.EXISTING;
 			}
 			index = (index + 1) & this.mask;
 		}
-		return false;
+		return AddResult.SATURATED;
 	}
 
 	void select(T value) {
@@ -119,5 +123,11 @@ final class VapsIdentityDecisionTable<T> {
 		value ^= value >>> 15;
 		value *= 0x846CA68B;
 		return value ^ value >>> 16;
+	}
+
+	enum AddResult {
+		INSERTED,
+		EXISTING,
+		SATURATED
 	}
 }

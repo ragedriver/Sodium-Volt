@@ -37,7 +37,12 @@ public abstract class ParticleEngineMixin {
 			float partialTickTime,
 			CallbackInfo callbackInfo
 	) {
-		VisibilityAwareParticleScheduler.beginParticleExtraction(this.particles, frustum, camera);
+		VisibilityAwareParticleScheduler.beginParticleExtraction(
+				this.particles,
+				frustum,
+				camera,
+				VoltGuardEngine.isEnabled()
+		);
 		VoltGuardEngine.beginParticleExtraction(this.particles, frustum, camera);
 	}
 

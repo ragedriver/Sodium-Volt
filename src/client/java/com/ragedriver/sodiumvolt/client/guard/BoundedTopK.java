@@ -1,23 +1,35 @@
 package com.ragedriver.sodiumvolt.client.guard;
 
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.IdentityHashMap;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.Set;
 
 final class BoundedTopK<T> {
-	private final int capacity;
-	private final boolean prioritizeDistance;
-	private final Comparator<Entry<T>> bestFirst;
+	private final List<Entry<T>> entryPool = new ArrayList<>();
 	private final PriorityQueue<Entry<T>> worstFirst;
+	private int capacity;
+	private boolean prioritizeDistance;
+	private int activeEntryCount;
 	private int allocatedEntryCount;
 
+	BoundedTopK() {
+		this.worstFirst = new PriorityQueue<>(
+				1,
+				(left, right) -> compare(right, left, this.prioritizeDistance)
+		);
+	}
+
 	BoundedTopK(int capacity, boolean prioritizeDistance) {
+		this();
+		this.reset(capacity, prioritizeDistance);
+	}
+
+	void reset(int capacity, boolean prioritizeDistance) {
+		this.clear();
 		this.capacity = Math.max(0, capacity);
 		this.prioritizeDistance = prioritizeDistance;
-		this.bestFirst = (left, right) -> compare(left, right, prioritizeDistance);
-		this.worstFirst = new PriorityQueue<>(Math.max(1, this.capacity), this.bestFirst.reversed());
 	}
 
 	void offer(
@@ -33,18 +45,13 @@ final class BoundedTopK<T> {
 
 		double safeDistanceSquared = sanitizeDistance(distanceSquared);
 		if (this.worstFirst.size() < this.capacity) {
-			this.worstFirst.add(new Entry<>(
-					value,
-					targeted,
-					critical,
-					safeDistanceSquared,
-					originalIndex
-			));
-			this.allocatedEntryCount++;
+			Entry<T> entry = this.acquireEntry();
+			entry.replace(value, targeted, critical, safeDistanceSquared, originalIndex);
+			this.worstFirst.add(entry);
 			return;
 		}
 
-		Entry<T> currentWorst = this.worstFirst.peek();
+		Entry<T> currentWorst = Objects.requireNonNull(this.worstFirst.peek());
 		if (compareCandidate(
 				targeted,
 				critical,
@@ -59,18 +66,18 @@ final class BoundedTopK<T> {
 		}
 	}
 
-	Set<T> toIdentitySet() {
-		Set<T> selected = Collections.newSetFromMap(new IdentityHashMap<>(this.worstFirst.size()));
-		for (Entry<T> entry : this.worstFirst) {
-			selected.add(entry.value());
-		}
-		return selected;
-	}
-
 	void addTo(Set<T> destination) {
 		for (Entry<T> entry : this.worstFirst) {
 			destination.add(entry.value());
 		}
+	}
+
+	void clear() {
+		this.worstFirst.clear();
+		for (int index = 0; index < this.activeEntryCount; index++) {
+			this.entryPool.get(index).clearValue();
+		}
+		this.activeEntryCount = 0;
 	}
 
 	int size() {
@@ -79,6 +86,27 @@ final class BoundedTopK<T> {
 
 	int allocatedEntryCount() {
 		return this.allocatedEntryCount;
+	}
+
+	boolean retainsValueForTesting(T value) {
+		for (Entry<T> entry : this.entryPool) {
+			if (entry.value() == value) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private Entry<T> acquireEntry() {
+		if (this.activeEntryCount < this.entryPool.size()) {
+			return this.entryPool.get(this.activeEntryCount++);
+		}
+
+		Entry<T> entry = new Entry<>();
+		this.entryPool.add(entry);
+		this.activeEntryCount++;
+		this.allocatedEntryCount++;
+		return entry;
 	}
 
 	private static int compare(Entry<?> left, Entry<?> right, boolean prioritizeDistance) {
@@ -143,16 +171,6 @@ final class BoundedTopK<T> {
 		private double distanceSquared;
 		private int originalIndex;
 
-		private Entry(
-				T value,
-				boolean targeted,
-				boolean critical,
-				double distanceSquared,
-				int originalIndex
-		) {
-			this.replace(value, targeted, critical, distanceSquared, originalIndex);
-		}
-
 		private void replace(
 				T value,
 				boolean targeted,
@@ -165,6 +183,10 @@ final class BoundedTopK<T> {
 			this.critical = critical;
 			this.distanceSquared = distanceSquared;
 			this.originalIndex = originalIndex;
+		}
+
+		private void clearValue() {
+			this.value = null;
 		}
 
 		private T value() {

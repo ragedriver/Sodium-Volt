@@ -1,5 +1,16 @@
 package com.ragedriver.sodiumvolt.client.smartfps;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+
 public final class SmartFpsLogicTest {
 	private static final long SECOND = 1_000_000_000L;
 
@@ -12,6 +23,9 @@ public final class SmartFpsLogicTest {
 		testCapPrecedenceAndVanillaCeiling();
 		testPowerModes();
 		testPowerSourceAggregation();
+		testPowerProbeLazyReuse();
+		testPowerProbeConcurrentReuse();
+		testPowerProbeInitializationRetry();
 		testPowerProbeErrorClassification();
 		testDisabledAndUnknownPowerFailOpen();
 		testClockRollbackRestartsDelay();
@@ -138,6 +152,89 @@ public final class SmartFpsLogicTest {
 				single.snapshot().equals(SmartFpsPowerSnapshot.discharging(67)),
 				"a normal single source must preserve its state and percentage"
 		);
+	}
+
+	private static void testPowerProbeLazyReuse() {
+		AtomicInteger constructions = new AtomicInteger();
+		Object expected = new Object();
+		SmartFpsPowerProbe.RetryableLazy<Object> lazy = new SmartFpsPowerProbe.RetryableLazy<>(
+				() -> {
+					constructions.incrementAndGet();
+					return expected;
+				}
+		);
+
+		check(constructions.get() == 0, "the OSHI state cache must initialize lazily");
+		check(lazy.get() == expected, "the first access must return the factory identity");
+		check(lazy.get() == expected, "sequential accesses must reuse one identity");
+		check(constructions.get() == 1, "sequential accesses must construct state once");
+	}
+
+	private static void testPowerProbeConcurrentReuse() {
+		int workerCount = 16;
+		AtomicInteger constructions = new AtomicInteger();
+		Object expected = new Object();
+		SmartFpsPowerProbe.RetryableLazy<Object> lazy = new SmartFpsPowerProbe.RetryableLazy<>(
+				() -> {
+					constructions.incrementAndGet();
+					return expected;
+				}
+		);
+		CountDownLatch ready = new CountDownLatch(workerCount);
+		CountDownLatch start = new CountDownLatch(1);
+		ExecutorService executor = Executors.newFixedThreadPool(workerCount);
+		List<Future<Object>> results = new ArrayList<>(workerCount);
+		try {
+			for (int worker = 0; worker < workerCount; worker++) {
+				results.add(executor.submit(() -> {
+					ready.countDown();
+					if (!start.await(5L, TimeUnit.SECONDS)) {
+						throw new AssertionError("concurrent cache test did not start in time");
+					}
+					return lazy.get();
+				}));
+			}
+			check(ready.await(5L, TimeUnit.SECONDS),
+					"concurrent cache workers must become ready");
+			start.countDown();
+			for (Future<Object> result : results) {
+				check(result.get(5L, TimeUnit.SECONDS) == expected,
+						"concurrent accesses must reuse one identity");
+			}
+		} catch (InterruptedException exception) {
+			Thread.currentThread().interrupt();
+			throw new AssertionError("concurrent cache test was interrupted", exception);
+		} catch (ExecutionException | TimeoutException exception) {
+			throw new AssertionError("concurrent cache access failed", exception);
+		} finally {
+			start.countDown();
+			executor.shutdownNow();
+		}
+		check(constructions.get() == 1, "concurrent accesses must construct state once");
+	}
+
+	private static void testPowerProbeInitializationRetry() {
+		AtomicInteger attempts = new AtomicInteger();
+		Object expected = new Object();
+		SmartFpsPowerProbe.RetryableLazy<Object> lazy = new SmartFpsPowerProbe.RetryableLazy<>(
+				() -> {
+					if (attempts.incrementAndGet() == 1) {
+						throw new IllegalStateException("expected test failure");
+					}
+					return expected;
+				}
+		);
+
+		boolean failed = false;
+		try {
+			lazy.get();
+		} catch (IllegalStateException expectedFailure) {
+			failed = true;
+		}
+		check(failed, "a failed initial construction must reach the fail-open caller");
+		check(lazy.get() == expected, "a failed initial construction must remain retryable");
+		check(lazy.get() == expected, "a successful retry must become the reusable identity");
+		check(attempts.get() == 2, "a successful retry must stop further construction attempts");
 	}
 
 	@SuppressWarnings("removal")

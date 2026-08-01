@@ -2,6 +2,7 @@ package com.ragedriver.sodiumvolt.client.resourcepack;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Objects;
 
 public final class ShieldContentValidators {
 	private static final byte[] PNG_SIGNATURE = new byte[]{
@@ -92,11 +93,9 @@ public final class ShieldContentValidators {
 			if (total > maximumBytes) {
 				return ShieldReason.SINGLE_RESOURCE_SIZE;
 			}
-			for (int index = 0; index < read; index++) {
-				ShieldReason reason = validator.accept(buffer[index] & 0xFF);
-				if (reason != ShieldReason.NONE) {
-					return reason;
-				}
+			ShieldReason reason = validator.accept(buffer, 0, read);
+			if (reason != ShieldReason.NONE) {
+				return reason;
 			}
 		}
 	}
@@ -150,6 +149,21 @@ public final class ShieldContentValidators {
 				}
 			}
 			return this.failed ? ShieldReason.JSON_NESTING : ShieldReason.NONE;
+		}
+
+		public ShieldReason accept(byte[] values, int offset, int length) {
+			Objects.checkFromIndexSize(offset, length, values.length);
+			if (this.failed) {
+				return ShieldReason.JSON_NESTING;
+			}
+			int end = offset + length;
+			for (int index = offset; index < end; index++) {
+				ShieldReason reason = accept(values[index] & 0xFF);
+				if (reason != ShieldReason.NONE) {
+					return reason;
+				}
+			}
+			return ShieldReason.NONE;
 		}
 
 		public ShieldReason finish() {

@@ -2,6 +2,7 @@ package com.ragedriver.sodiumvolt.client.performance;
 
 import com.ragedriver.sodiumvolt.SodiumVolt;
 import com.ragedriver.sodiumvolt.client.config.VoltPerformanceConfig;
+import com.ragedriver.sodiumvolt.client.guard.VoltGuardEngine;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
@@ -245,6 +246,7 @@ public final class BlockEntityRenderBudgetEngine {
 	}
 
 	public static void onResourceReload() {
+		VoltGuardEngine.abortBlockEntityHandoff();
 		clearCache();
 		FAIL_OPEN_LATCH.resetForLifecycle();
 	}
@@ -329,14 +331,29 @@ public final class BlockEntityRenderBudgetEngine {
 					STATS.addTruncatedFrame();
 				}
 			}
+			boolean guardHandoffStarted = VoltGuardEngine.beginBlockEntityHandoff(
+					states,
+					context.camera().position(),
+					Minecraft.getInstance().hitResult
+			);
+			int survivorIndex = 0;
 			Iterator<BlockEntityRenderState> iterator = states.iterator();
 			while (iterator.hasNext()) {
 				BlockEntityRenderState state = iterator.next();
 				if (FRAME_DECISIONS.isScanned(state) && !FRAME_DECISIONS.isSelected(state)) {
 					iterator.remove();
+				} else {
+					if (guardHandoffStarted) {
+						VoltGuardEngine.offerBlockEntitySurvivor(state, survivorIndex);
+					}
+					survivorIndex++;
 				}
 			}
+			if (guardHandoffStarted) {
+				VoltGuardEngine.completeBlockEntityHandoff(states);
+			}
 		} catch (RuntimeException | LinkageError exception) {
+			VoltGuardEngine.abortBlockEntityHandoff();
 			failOpen(exception);
 		} finally {
 			FRAME_DECISIONS.releaseFrame();
@@ -429,6 +446,7 @@ public final class BlockEntityRenderBudgetEngine {
 		FAIL_OPEN_LATCH.observeDisabled();
 		hasTarget = false;
 		hasRecentInteraction = false;
+		VoltGuardEngine.abortBlockEntityHandoff();
 		if (!active && cache == null) {
 			return;
 		}
@@ -446,6 +464,7 @@ public final class BlockEntityRenderBudgetEngine {
 		hasRecentInteraction = false;
 		recentInteractionUntilTick = Long.MIN_VALUE;
 		FAIL_OPEN_LATCH.resetForLifecycle();
+		VoltGuardEngine.abortBlockEntityHandoff();
 		clearCache();
 		STATS.reset();
 	}
@@ -459,6 +478,7 @@ public final class BlockEntityRenderBudgetEngine {
 
 	private static void failOpen(Throwable exception) {
 		FRAME_DECISIONS.releaseFrame();
+		VoltGuardEngine.abortBlockEntityHandoff();
 		clearCache();
 		active = false;
 		frameReady = false;

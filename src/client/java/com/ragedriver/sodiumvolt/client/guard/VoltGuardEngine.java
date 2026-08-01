@@ -3,6 +3,7 @@ package com.ragedriver.sodiumvolt.client.guard;
 import com.ragedriver.sodiumvolt.client.config.VoltGuardConfig;
 import com.ragedriver.sodiumvolt.client.mixin.ParticleGroupAccessor;
 import com.ragedriver.sodiumvolt.client.mixin.ParticlePositionAccessor;
+import com.ragedriver.sodiumvolt.client.performance.ParticleEligibilityHandoff;
 import com.ragedriver.sodiumvolt.client.performance.VisibilityAwareParticleScheduler;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionContext;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelExtractionEvents;
@@ -79,7 +80,13 @@ public final class VoltGuardEngine {
 				CONFIG.isPrioritizeVisibleEffects(),
 				CONFIG.isPreserveGameplayCriticalEffects()
 		);
-		selectParticles(frame, particleGroups, frustum, camera.position());
+		ParticleEligibilityHandoff<Particle> eligibilityHandoff =
+				VisibilityAwareParticleScheduler.particleEligibilityHandoff();
+		if (eligibilityHandoff != null) {
+			selectParticles(frame, eligibilityHandoff, camera.position());
+		} else {
+			selectParticles(frame, particleGroups, frustum, camera.position());
+		}
 	}
 
 	public static void endParticleExtraction() {
@@ -99,6 +106,70 @@ public final class VoltGuardEngine {
 		return !frame.particleExtractionActive
 				|| frame.allParticlesSelected
 				|| frame.selectedParticles.contains(particle);
+	}
+
+	private static void selectParticles(
+			FrameState frame,
+			ParticleEligibilityHandoff<Particle> eligibilityHandoff,
+			Vec3 cameraPosition
+	) {
+		int eligibleCount = eligibilityHandoff.candidateCount();
+		if (eligibleCount <= frame.particleBudget) {
+			frame.allParticlesSelected = true;
+			frame.suppressedParticles = 0;
+			return;
+		}
+
+		ParticleBudgetPlan plan = ParticleBudgetPlan.create(
+				frame.particleBudget,
+				eligibilityHandoff.specialCount(),
+				frame.preserveCritical
+		);
+		Set<Particle> selected = frame.selectedParticles;
+		if (plan.specialReserveCapacity() > 0) {
+			BoundedTopK<Particle> specialReserve = frame.specialParticleSelection;
+			specialReserve.reset(plan.specialReserveCapacity(), frame.prioritizeNearby);
+			for (int index = 0; index < eligibilityHandoff.candidateCount(); index++) {
+				if (!eligibilityHandoff.isSpecial(index)) {
+					continue;
+				}
+				Particle particle = eligibilityHandoff.candidateAt(index);
+				specialReserve.offer(
+						particle,
+						false,
+						true,
+						particleDistanceSquared(particle, cameraPosition),
+						eligibilityHandoff.originalIndexAt(index)
+				);
+			}
+			specialReserve.addTo(selected);
+			specialReserve.clear();
+		}
+
+		BoundedTopK<Particle> generalSelection = frame.generalParticleSelection;
+		generalSelection.reset(
+				plan.remainingCapacityAfter(selected.size()),
+				frame.prioritizeNearby
+		);
+		for (int index = 0; index < eligibilityHandoff.candidateCount(); index++) {
+			Particle particle = eligibilityHandoff.candidateAt(index);
+			if (selected.contains(particle)) {
+				continue;
+			}
+			double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+			generalSelection.offer(
+					particle,
+					false,
+					frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
+					distanceSquared,
+					eligibilityHandoff.originalIndexAt(index)
+			);
+		}
+		generalSelection.addTo(selected);
+		generalSelection.clear();
+
+		frame.allParticlesSelected = false;
+		frame.suppressedParticles = Math.max(0, eligibleCount - selected.size());
 	}
 
 	private static void selectParticles(
@@ -145,9 +216,10 @@ public final class VoltGuardEngine {
 				specialCount,
 				frame.preserveCritical
 		);
-		Set<Particle> selected = Collections.newSetFromMap(new IdentityHashMap<>(frame.particleBudget));
+		Set<Particle> selected = frame.selectedParticles;
 		if (plan.specialReserveCapacity() > 0) {
-			BoundedTopK<Particle> specialReserve = new BoundedTopK<>(
+			BoundedTopK<Particle> specialReserve = frame.specialParticleSelection;
+			specialReserve.reset(
 					plan.specialReserveCapacity(),
 					frame.prioritizeNearby
 			);
@@ -177,10 +249,12 @@ public final class VoltGuardEngine {
 				originalIndex++;
 			}
 			specialReserve.addTo(selected);
+			specialReserve.clear();
 		}
 
 		int remainingCapacity = plan.remainingCapacityAfter(selected.size());
-		BoundedTopK<Particle> generalSelection = new BoundedTopK<>(
+		BoundedTopK<Particle> generalSelection = frame.generalParticleSelection;
+		generalSelection.reset(
 				remainingCapacity,
 				frame.prioritizeNearby
 		);
@@ -229,9 +303,9 @@ public final class VoltGuardEngine {
 			originalIndex++;
 		}
 		generalSelection.addTo(selected);
+		generalSelection.clear();
 
 		frame.allParticlesSelected = false;
-		frame.selectedParticles = selected;
 		frame.suppressedParticles = Math.max(0, eligibleCount - selected.size());
 	}
 
@@ -263,6 +337,33 @@ public final class VoltGuardEngine {
 		return xDistance * xDistance + yDistance * yDistance + zDistance * zDistance;
 	}
 
+	public static boolean beginBlockEntityHandoff(
+			List<BlockEntityRenderState> states,
+			Vec3 cameraPosition,
+			@Nullable HitResult hitResult
+	) {
+		FrameState frame = FRAME_STATE.get();
+		if (!CONFIG.isVoltGuardEnabled()) {
+			frame.abortBlockEntityHandoff();
+			return false;
+		}
+		ensureConfigured(frame);
+		frame.beginBlockEntityHandoff(states, cameraPosition, hitResult);
+		return true;
+	}
+
+	public static void offerBlockEntitySurvivor(BlockEntityRenderState state, int originalIndex) {
+		FRAME_STATE.get().offerBlockEntitySurvivor(state, originalIndex);
+	}
+
+	public static void completeBlockEntityHandoff(List<BlockEntityRenderState> states) {
+		FRAME_STATE.get().completeBlockEntityHandoff(states);
+	}
+
+	public static void abortBlockEntityHandoff() {
+		FRAME_STATE.get().abortBlockEntityHandoff();
+	}
+
 	private static void finishLevelExtraction(LevelExtractionContext context) {
 		if (!CONFIG.isVoltGuardEnabled()) {
 			FRAME_STATE.get().disable();
@@ -272,32 +373,30 @@ public final class VoltGuardEngine {
 
 		FrameState frame = FRAME_STATE.get();
 		if (!frame.configured) {
-			double scale = ADAPTIVE_BUDGET.update(
-					System.nanoTime(),
-					CONFIG.getTargetFps(),
-					CONFIG.isAdaptiveWorkloadControl()
-			);
-			frame.configure(
-					effectiveBudget(CONFIG.getParticleRenderBudget(), scale),
-					effectiveBudget(CONFIG.getBlockEntityRenderBudget(), scale),
-					effectiveBudget(CONFIG.getDisplayEntityRenderBudget(), scale),
-					CONFIG.isPrioritizeVisibleEffects(),
-					CONFIG.isPreserveGameplayCriticalEffects()
-			);
+			ensureConfigured(frame);
 			frame.particleExtractionActive = false;
 		}
 
 		LevelRenderState levelState = context.levelState();
 		HitResult hitResult = Minecraft.getInstance().hitResult;
-		int removedBlockEntities = limitBlockEntities(
-				levelState.blockEntityRenderStates,
-				frame.blockEntityBudget,
-				frame.prioritizeNearby,
-				frame.preserveCritical,
-				context.camera().position(),
-				hitResult
-		);
+		List<BlockEntityRenderState> blockEntityStates = levelState.blockEntityRenderStates;
+		int removedBlockEntities;
+		if (frame.hasCompletedBlockEntityHandoff(blockEntityStates)) {
+			removedBlockEntities = frame.consumeBlockEntityHandoff(blockEntityStates);
+		} else {
+			frame.abortBlockEntityHandoff();
+			removedBlockEntities = limitBlockEntities(
+					frame,
+					blockEntityStates,
+					frame.blockEntityBudget,
+					frame.prioritizeNearby,
+					frame.preserveCritical,
+					context.camera().position(),
+					hitResult
+			);
+		}
 		int removedDisplayEntities = limitDisplayEntities(
+				frame,
 				levelState.entityRenderStates,
 				frame.displayEntityBudget,
 				frame.prioritizeNearby,
@@ -312,7 +411,26 @@ public final class VoltGuardEngine {
 		frame.finishFrame();
 	}
 
+	private static void ensureConfigured(FrameState frame) {
+		if (frame.configured) {
+			return;
+		}
+		double scale = ADAPTIVE_BUDGET.update(
+				System.nanoTime(),
+				CONFIG.getTargetFps(),
+				CONFIG.isAdaptiveWorkloadControl()
+		);
+		frame.configure(
+				effectiveBudget(CONFIG.getParticleRenderBudget(), scale),
+				effectiveBudget(CONFIG.getBlockEntityRenderBudget(), scale),
+				effectiveBudget(CONFIG.getDisplayEntityRenderBudget(), scale),
+				CONFIG.isPrioritizeVisibleEffects(),
+				CONFIG.isPreserveGameplayCriticalEffects()
+		);
+	}
+
 	private static int limitBlockEntities(
+			FrameState frame,
 			List<BlockEntityRenderState> states,
 			int budget,
 			boolean prioritizeNearby,
@@ -332,11 +450,12 @@ public final class VoltGuardEngine {
 		BlockPos targetedBlock = preserveCritical && hitResult instanceof BlockHitResult blockHit
 				? blockHit.getBlockPos()
 				: null;
-		BoundedTopK<BlockEntityRenderState> selection = new BoundedTopK<>(budget, prioritizeNearby);
+		BlockEntityGuardHandoff<BlockEntityRenderState> handoff = frame.blockEntityHandoff;
+		handoff.begin(stateCount, budget, prioritizeNearby, preserveCritical);
 		for (int index = 0; index < stateCount; index++) {
 			BlockEntityRenderState state = states.get(index);
 			double distanceSquared = blockDistanceSquared(state.blockPos, cameraPosition);
-			selection.offer(
+			handoff.offer(
 					state,
 					targetedBlock != null && targetedBlock.equals(state.blockPos),
 					preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
@@ -344,12 +463,12 @@ public final class VoltGuardEngine {
 					index
 			);
 		}
-		Set<BlockEntityRenderState> selected = selection.toIdentitySet();
-		states.removeIf(state -> !selected.contains(state));
-		return stateCount - states.size();
+		handoff.complete();
+		return handoff.applyTo(states);
 	}
 
 	private static int limitDisplayEntities(
+			FrameState frame,
 			List<EntityRenderState> states,
 			int budget,
 			boolean prioritizeNearby,
@@ -379,7 +498,10 @@ public final class VoltGuardEngine {
 		Vec3 targetedPosition = preserveCritical && hitResult instanceof EntityHitResult
 				? hitResult.getLocation()
 				: null;
-		BoundedTopK<EntityRenderState> selection = new BoundedTopK<>(budget, prioritizeNearby);
+		BoundedTopK<EntityRenderState> selection = frame.displayEntitySelection;
+		Set<EntityRenderState> selected = frame.selectedDisplayEntities;
+		selection.reset(budget, prioritizeNearby);
+		selected.clear();
 		for (int index = 0; index < states.size(); index++) {
 			EntityRenderState state = states.get(index);
 			if (state instanceof DisplayEntityRenderState) {
@@ -392,8 +514,16 @@ public final class VoltGuardEngine {
 				);
 			}
 		}
-		Set<EntityRenderState> selected = selection.toIdentitySet();
-		states.removeIf(state -> state instanceof DisplayEntityRenderState && !selected.contains(state));
+		selection.addTo(selected);
+		selection.clear();
+		Iterator<EntityRenderState> iterator = states.iterator();
+		while (iterator.hasNext()) {
+			EntityRenderState state = iterator.next();
+			if (state instanceof DisplayEntityRenderState && !selected.contains(state)) {
+				iterator.remove();
+			}
+		}
+		selected.clear();
 		return displayCount - budget;
 	}
 
@@ -470,6 +600,13 @@ public final class VoltGuardEngine {
 	}
 
 	private static final class FrameState {
+		private final BoundedTopK<Particle> specialParticleSelection = new BoundedTopK<>();
+		private final BoundedTopK<Particle> generalParticleSelection = new BoundedTopK<>();
+		private final BlockEntityGuardHandoff<BlockEntityRenderState> blockEntityHandoff =
+				new BlockEntityGuardHandoff<>();
+		private final BoundedTopK<EntityRenderState> displayEntitySelection = new BoundedTopK<>();
+		private final Set<Particle> selectedParticles = newIdentitySet();
+		private final Set<EntityRenderState> selectedDisplayEntities = newIdentitySet();
 		private boolean configured;
 		private boolean particleExtractionActive;
 		private boolean allParticlesSelected;
@@ -479,8 +616,11 @@ public final class VoltGuardEngine {
 		private int blockEntityBudget;
 		private int displayEntityBudget;
 		private int suppressedParticles;
-		private Set<Particle> selectedParticles = Collections.emptySet();
-
+		private List<BlockEntityRenderState> blockEntityHandoffSource;
+		private Vec3 blockEntityHandoffCamera = Vec3.ZERO;
+		private BlockPos blockEntityHandoffTarget;
+		private boolean blockEntityHandoffRecording;
+		private boolean blockEntityHandoffComplete;
 		private void configure(
 				int particleBudget,
 				int blockEntityBudget,
@@ -497,18 +637,18 @@ public final class VoltGuardEngine {
 			this.blockEntityBudget = blockEntityBudget;
 			this.displayEntityBudget = displayEntityBudget;
 			this.suppressedParticles = 0;
-			this.selectedParticles = Collections.emptySet();
+			this.clearSelections();
 		}
 
 		private void endParticleExtraction() {
 			this.particleExtractionActive = false;
-			this.selectedParticles = Collections.emptySet();
+			this.clearParticleSelection();
 		}
 
 		private void finishFrame() {
 			this.configured = false;
 			this.particleExtractionActive = false;
-			this.selectedParticles = Collections.emptySet();
+			this.clearSelections();
 		}
 
 		private void disable() {
@@ -516,7 +656,102 @@ public final class VoltGuardEngine {
 			this.particleExtractionActive = false;
 			this.allParticlesSelected = true;
 			this.suppressedParticles = 0;
-			this.selectedParticles = Collections.emptySet();
+			this.clearSelections();
+		}
+
+		private void clearSelections() {
+			this.clearParticleSelection();
+			this.abortBlockEntityHandoff();
+			this.displayEntitySelection.clear();
+			this.selectedDisplayEntities.clear();
+		}
+
+		private void clearParticleSelection() {
+			this.specialParticleSelection.clear();
+			this.generalParticleSelection.clear();
+			this.selectedParticles.clear();
+		}
+
+		private void beginBlockEntityHandoff(
+				List<BlockEntityRenderState> states,
+				Vec3 cameraPosition,
+				@Nullable HitResult hitResult
+		) {
+			this.abortBlockEntityHandoff();
+			this.blockEntityHandoffSource = states;
+			this.blockEntityHandoffCamera = cameraPosition;
+			this.blockEntityHandoffTarget = this.preserveCritical
+					&& hitResult instanceof BlockHitResult blockHit
+					? blockHit.getBlockPos()
+					: null;
+			this.blockEntityHandoff.begin(
+					states.size(),
+					this.blockEntityBudget,
+					this.prioritizeNearby,
+					this.preserveCritical
+			);
+			this.blockEntityHandoffRecording = true;
+		}
+
+		private void offerBlockEntitySurvivor(BlockEntityRenderState state, int originalIndex) {
+			if (!this.blockEntityHandoffRecording) {
+				return;
+			}
+			if (!this.blockEntityHandoff.requiresRanking()) {
+				this.blockEntityHandoff.offerUnranked();
+				return;
+			}
+			double distanceSquared = blockDistanceSquared(state.blockPos, this.blockEntityHandoffCamera);
+			this.blockEntityHandoff.offer(
+					state,
+					this.blockEntityHandoffTarget != null
+							&& this.blockEntityHandoffTarget.equals(state.blockPos),
+					this.preserveCritical
+							&& distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
+					distanceSquared,
+					originalIndex
+			);
+		}
+
+		private void completeBlockEntityHandoff(List<BlockEntityRenderState> states) {
+			if (!this.blockEntityHandoffRecording || this.blockEntityHandoffSource != states) {
+				this.abortBlockEntityHandoff();
+				return;
+			}
+			this.blockEntityHandoff.complete();
+			this.blockEntityHandoffRecording = false;
+			this.blockEntityHandoffComplete = true;
+		}
+
+		private boolean hasCompletedBlockEntityHandoff(List<BlockEntityRenderState> states) {
+			return this.blockEntityHandoffComplete
+					&& this.blockEntityHandoffSource == states
+					&& this.blockEntityHandoff.isCompleteForSize(states.size());
+		}
+
+		private int consumeBlockEntityHandoff(List<BlockEntityRenderState> states) {
+			try {
+				return this.blockEntityHandoff.applyTo(states);
+			} finally {
+				this.clearBlockEntityHandoffMetadata();
+			}
+		}
+
+		private void abortBlockEntityHandoff() {
+			this.blockEntityHandoff.abort();
+			this.clearBlockEntityHandoffMetadata();
+		}
+
+		private void clearBlockEntityHandoffMetadata() {
+			this.blockEntityHandoffSource = null;
+			this.blockEntityHandoffCamera = Vec3.ZERO;
+			this.blockEntityHandoffTarget = null;
+			this.blockEntityHandoffRecording = false;
+			this.blockEntityHandoffComplete = false;
+		}
+
+		private static <T> Set<T> newIdentitySet() {
+			return Collections.newSetFromMap(new IdentityHashMap<>());
 		}
 	}
 }
