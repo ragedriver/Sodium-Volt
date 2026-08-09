@@ -11,6 +11,7 @@ public final class ApcLogicTest {
 
 	public static void main(String[] args) {
 		testFrameWindowPercentileAndBounds();
+		testPercentileSelectionEquivalence();
 		testEffectiveTargetCeilings();
 		testHysteresisAndBoundaryCounters();
 		testQualityOrderingAndProfileBounds();
@@ -34,6 +35,34 @@ public final class ApcLogicTest {
 		assertEquals(60, window.size(60), "requested frame window bound");
 		window.clear();
 		assertEquals(0, window.size(100), "clear");
+	}
+
+	private static void testPercentileSelectionEquivalence() {
+		int capacity = 1_200;
+		long[] buffer = new long[capacity];
+		for (int scenario = 0; scenario < 5; scenario++) {
+			ApcFrameWindow window = new ApcFrameWindow(capacity);
+			long[] expected = new long[capacity];
+			for (int index = 0; index < capacity; index++) {
+				long value = switch (scenario) {
+					case 0 -> (index % 997L + 1L) * 1_000_000L;
+					case 1 -> ((capacity - index - 1L) % 997L + 1L) * 1_000_000L;
+					case 2 -> 17_000_000L;
+					case 3 -> ((index * 7919L) % 997L + 1L) * 1_000_000L;
+					default -> (index % 2 == 0 ? 1L : 999L) * 1_000_000L;
+				};
+				window.addNanos(value);
+				expected[index] = value;
+			}
+			java.util.Arrays.sort(expected);
+			int percentile = (int) Math.ceil(capacity * 0.95D) - 1;
+			assertNear(
+					expected[percentile] / 1_000_000.0D,
+					window.p95Milliseconds(capacity, buffer),
+					0.0001D,
+					"linear selection must match exact sorted p95 for scenario " + scenario
+			);
+		}
 	}
 
 	private static void testEffectiveTargetCeilings() {

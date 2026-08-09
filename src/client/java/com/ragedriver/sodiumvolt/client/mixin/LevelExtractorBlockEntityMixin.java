@@ -1,6 +1,7 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.performance.BlockEntityRenderBudgetEngine;
+import com.ragedriver.sodiumvolt.client.performance.BerpExtractionRouter;
 import net.minecraft.client.Camera;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.blockentity.BlockEntityRenderDispatcher;
@@ -50,7 +51,7 @@ public abstract class LevelExtractorBlockEntityMixin {
 			ModelFeatureRenderer.CrumblingOverlay crumblingOverlay,
 			boolean offscreen
 	) {
-		return BlockEntityRenderBudgetEngine.extract(
+		return BerpExtractionRouter.route(
 				dispatcher,
 				blockEntity,
 				partialTick,

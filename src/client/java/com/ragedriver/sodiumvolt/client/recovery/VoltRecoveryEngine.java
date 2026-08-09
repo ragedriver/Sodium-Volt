@@ -4,6 +4,7 @@ import com.ragedriver.sodiumvolt.SodiumVolt;
 import com.ragedriver.sodiumvolt.client.config.VoltRecoveryConfig;
 import com.ragedriver.sodiumvolt.client.mixin.OptionInstanceAccessor;
 import com.ragedriver.sodiumvolt.client.performance.AdaptivePerformanceController;
+import com.ragedriver.sodiumvolt.client.performance.InspectorStatisticsDemand;
 import com.ragedriver.sodiumvolt.client.watchdog.WatchdogRecoveryRequestStore;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.minecraft.client.CloudStatus;
@@ -21,6 +22,7 @@ public final class VoltRecoveryEngine {
 	private static final VoltRecoveryConfig CONFIG = VoltRecoveryConfig.getInstance();
 	private static final RecoveryStableTimer STABLE_TIMER = new RecoveryStableTimer();
 	private static final RecoveryTransitionGate TRANSITION_GATE = new RecoveryTransitionGate();
+	private static final RecoveryFastGate FAST_GATE = new RecoveryFastGate();
 
 	private static volatile boolean recoveryActive;
 	private static volatile StatisticsSnapshot statistics = StatisticsSnapshot.EMPTY;
@@ -64,6 +66,7 @@ public final class VoltRecoveryEngine {
 		}
 		if (TRANSITION_GATE.isClientStopping()) {
 			clearTransientRecoveryState();
+			FAST_GATE.clear();
 			publishStatistics(nowNanos, RecoveryStatus.OFF);
 			return;
 		}
@@ -106,7 +109,17 @@ public final class VoltRecoveryEngine {
 		publishStatistics(nowNanos, currentStatus());
 	}
 
+	public static boolean requiresRenderFrameTimestamp() {
+		return FAST_GATE.requiresRenderFrame(
+				CONFIG.isVoltRecoveryEnabled(),
+				TRANSITION_GATE.isClientStopping()
+		);
+	}
+
 	public static int applyFramerateLimit(int currentLimit) {
+		if (!recoveryActive) {
+			return currentLimit;
+		}
 		return RecoverySessionLogic.composeFpsLimit(
 				currentLimit,
 				!TRANSITION_GATE.isClientStopping()
@@ -117,6 +130,9 @@ public final class VoltRecoveryEngine {
 	}
 
 	public static boolean shouldSuspendApcSampling() {
+		if (!FAST_GATE.maySuspendApc(recoveryActive)) {
+			return false;
+		}
 		return !TRANSITION_GATE.isClientStopping()
 				&& CONFIG.isVoltRecoveryEnabled()
 				&& RecoverySessionLogic.suspendApc(
@@ -127,7 +143,8 @@ public final class VoltRecoveryEngine {
 	}
 
 	public static StatisticsSnapshot snapshotStatistics() {
-		if (!CONFIG.isVoltRecoveryEnabled() || !CONFIG.isShowRecoveryStatsInInspector()) {
+		if (!CONFIG.isVoltRecoveryEnabled() || !CONFIG.isShowRecoveryStatsInInspector()
+				|| !InspectorStatisticsDemand.isRequested()) {
 			return StatisticsSnapshot.EMPTY;
 		}
 		return statistics;
@@ -178,6 +195,7 @@ public final class VoltRecoveryEngine {
 			failPersistenceOnce();
 			clearTransientRecoveryState();
 			state = loaded;
+			publishFastState();
 			return;
 		}
 		if (externalRequest.shouldAcknowledge(true, plan.activateRecovery())) {
@@ -196,6 +214,7 @@ public final class VoltRecoveryEngine {
 		stableSessionReached = false;
 		recoveryActive = plan.activateRecovery();
 		STABLE_TIMER.reset();
+		publishFastState();
 
 		boolean profileApplied = false;
 		if (plan.mayMutateOptions(true) && CONFIG.isApplySafeGraphicsProfile()
@@ -235,6 +254,7 @@ public final class VoltRecoveryEngine {
 							: RecoveryReport.Restoration.NOT_REQUESTED
 			));
 		}
+		publishFastState();
 		publishStatistics(System.nanoTime(), currentStatus());
 	}
 
@@ -254,6 +274,7 @@ public final class VoltRecoveryEngine {
 					state.withAppliedBackup(state.original(), applied);
 			if (RecoveryStateStore.save(updated)) {
 				state = updated;
+				publishFastState();
 			} else {
 				TRANSITION_GATE.transitionFailed();
 				failPersistenceOnce();
@@ -305,6 +326,7 @@ public final class VoltRecoveryEngine {
 		loopGuardActive = false;
 		stableSessionReached = reportTransition;
 		STABLE_TIMER.reset();
+		publishFastState();
 		if (reportTransition) {
 			pendingNotification = Notification.STABLE;
 			writeReport(new RecoveryReport(
@@ -318,6 +340,9 @@ public final class VoltRecoveryEngine {
 	}
 
 	private static void disableAtRuntime(Minecraft minecraft) {
+		// One attempt belongs to one observed OFF transition. A failed cleanup is
+		// retried only after the master changes again, never on every disabled frame.
+		FAST_GATE.clear();
 		boolean hadBackup = state.hasBackup();
 		boolean reportTransition = state.crashStreak() > 0
 				|| state.recoveryAttempts() > 0
@@ -354,6 +379,7 @@ public final class VoltRecoveryEngine {
 
 	private static void onClientStopping(Minecraft minecraft) {
 		TRANSITION_GATE.beginClientStopping();
+		FAST_GATE.clear();
 		recoveryActive = false;
 		if (!monitoring && !state.sessionActive() && !state.hasBackup()) {
 			return;
@@ -394,6 +420,13 @@ public final class VoltRecoveryEngine {
 		stableSessionReached = false;
 		pendingNotification = Notification.NONE;
 		STABLE_TIMER.reset();
+	}
+
+	private static void publishFastState() {
+		FAST_GATE.publish(
+				monitoring || state.sessionActive() || state.hasBackup(),
+				state.hasBackup() && state.profileApplied()
+		);
 	}
 
 	private static RestoreOutcome restoreOwnedOptions(Minecraft minecraft) {
@@ -601,6 +634,14 @@ public final class VoltRecoveryEngine {
 	}
 
 	private static void publishStatistics(long nowNanos, RecoveryStatus status) {
+		boolean collectStatistics = CONFIG.isShowRecoveryStatsInInspector()
+				&& InspectorStatisticsDemand.isRequested();
+		if (!collectStatistics) {
+			if (RecoveryStatisticsGate.shouldClear(false, statistics)) {
+				statistics = StatisticsSnapshot.EMPTY;
+			}
+			return;
+		}
 		boolean trackingStability = recoveryActive
 				|| state.crashStreak() > 0
 				|| state.recoveryAttempts() > 0
@@ -611,20 +652,40 @@ public final class VoltRecoveryEngine {
 						CONFIG.getStableSessionDurationSeconds() * 1_000_000_000L
 				)
 				: 0L;
-		statistics = new StatisticsSnapshot(
-				status,
-				state.crashStreak(),
-				state.recoveryAttempts(),
-				CONFIG.getMaximumRecoveryAttempts(),
-				state.profileApplied(),
-				secondsToStable,
-				RecoverySessionLogic.composeFpsLimit(
+		int crashStreak = state.crashStreak();
+		int recoveryAttempts = state.recoveryAttempts();
+		int maximumAttempts = CONFIG.getMaximumRecoveryAttempts();
+		boolean ownedProfile = state.profileApplied();
+		int recoveryFpsCap = RecoverySessionLogic.composeFpsLimit(
 						Integer.MAX_VALUE,
 						CONFIG.isVoltRecoveryEnabled() && recoveryActive,
 						CONFIG.isLimitFpsDuringRecovery(),
 						CONFIG.getRecoveryFpsCap()
-				),
-				shouldSuspendApcSampling()
+				);
+		boolean apcSuspended = shouldSuspendApcSampling();
+		StatisticsSnapshot previous = statistics;
+		if (RecoveryStatisticsGate.matches(
+				previous,
+				status,
+				crashStreak,
+				recoveryAttempts,
+				maximumAttempts,
+				ownedProfile,
+				secondsToStable,
+				recoveryFpsCap,
+				apcSuspended
+		)) {
+			return;
+		}
+		statistics = new StatisticsSnapshot(
+				status,
+				crashStreak,
+				recoveryAttempts,
+				maximumAttempts,
+				ownedProfile,
+				secondsToStable,
+				recoveryFpsCap,
+				apcSuspended
 		);
 	}
 

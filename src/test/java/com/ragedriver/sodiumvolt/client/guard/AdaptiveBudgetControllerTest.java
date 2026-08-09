@@ -1,6 +1,7 @@
 package com.ragedriver.sodiumvolt.client.guard;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
@@ -19,8 +20,15 @@ public final class AdaptiveBudgetControllerTest {
 		ranksTargetedAndCriticalWorkFirst();
 		usesStableFirstKWithoutPrioritization();
 		accountsForOneStrictParticleBudget();
+		usesNormalLoadUpperBoundFastPaths();
+		fusesReservedAndGeneralParticleSelection();
+		fallsBackExactlyForDuplicateGeneralIdentities();
 		recyclesBoundedSelectorEntries();
+		keepsRankStorageLazyUntilARealCandidate();
 		reusesSelectorStorageAcrossFrames();
+		releasesSelectorStorageOnDurableDisable();
+		releasesThreadStateAfterFinishedFrameDisable();
+		selectsExactDuplicateOccurrencesByOriginalIndex();
 		preservesIdentityMembershipAcrossResets();
 		coordinatesBlockEntityRankingWithoutASurvivorRescan();
 		preservesBlockEntityHandoffSemanticsAndLifecycle();
@@ -135,6 +143,193 @@ public final class AdaptiveBudgetControllerTest {
 		require(minimum.remainingCapacityAfter(1) == 0, "Special reservations must never exceed the cap");
 	}
 
+	private static void usesNormalLoadUpperBoundFastPaths() {
+		require(GuardWorkloadBounds.particleQueuesFitBudget(30, 2, 1, 33),
+				"raw particle queue sizes at the budget must bypass visibility and VAPS scans");
+		require(!GuardWorkloadBounds.particleQueuesFitBudget(30, 2, 2, 33),
+				"one raw particle beyond the budget must retain the cheap eligibility count");
+		require(GuardWorkloadBounds.eligibleParticlesFitBudget(33, 33)
+					&& !GuardWorkloadBounds.eligibleParticlesFitBudget(34, 33),
+				"filtered raw loads must rank only when their exact eligible count exceeds the budget");
+		require(GuardWorkloadBounds.relevantParticleUpperBound(
+				Integer.MAX_VALUE, 1, 1) == Integer.MAX_VALUE,
+				"adversarial raw queue sizes must saturate instead of wrapping into a fast path");
+		require(GuardWorkloadBounds.statesFitBudget(128, 128)
+					&& !GuardWorkloadBounds.statesFitBudget(129, 128),
+				"display and BERP handoff bounds must use an inclusive budget boundary");
+	}
+
+	private static void fusesReservedAndGeneralParticleSelection() {
+		Object special = new Object();
+		Object near = new Object();
+		Object medium = new Object();
+		Object far = new Object();
+		ParticleCandidate[] candidates = {
+				new ParticleCandidate(far, false, 100.0D, 0),
+				new ParticleCandidate(special, true, 50.0D, 1),
+				new ParticleCandidate(medium, false, 9.0D, 2),
+				new ParticleCandidate(near, false, 1.0D, 3)
+		};
+		Set<Object> expected = legacyParticleSelection(candidates, 3, true, true);
+		Set<Object> actual = newIdentitySet();
+		SpillAwareParticleSelector<Object> selector = new SpillAwareParticleSelector<>();
+		selector.begin(3, true, true);
+		int specialCount = 0;
+		for (ParticleCandidate candidate : candidates) {
+			selector.offer(
+					candidate.value(),
+					candidate.special(),
+					candidate.distanceSquared() <= 64.0D,
+					candidate.distanceSquared(),
+					candidate.originalIndex()
+			);
+			if (candidate.special()) {
+				specialCount++;
+			}
+		}
+		require(selector.finishFromSpill(actual, specialCount),
+				"identity-unique input must finalize after one shared candidate traversal");
+		require(sameIdentityMembership(expected, actual, candidates),
+				"fused reserve/general selection must match the legacy two-pass membership");
+		for (ParticleCandidate candidate : candidates) {
+			require(!selector.retainsReferenceForTesting(candidate.value()),
+					"successful fused finalization must release candidate references");
+		}
+		int allocatedEntries = selector.allocatedEntriesForTesting();
+		require(allocatedEntries == 4,
+				"a three-particle budget with one reserve must retain only special plus spill pools");
+		actual.clear();
+		selector.begin(3, true, true);
+		for (ParticleCandidate candidate : candidates) {
+			selector.offer(
+					candidate.value(),
+					candidate.special(),
+					candidate.distanceSquared() <= 64.0D,
+					candidate.distanceSquared(),
+					candidate.originalIndex()
+			);
+		}
+		require(selector.finishFromSpill(actual, specialCount)
+					&& selector.allocatedEntriesForTesting() == allocatedEntries,
+				"later frames must reuse bounded selector storage without per-frame entry allocation");
+	}
+
+	private static void fallsBackExactlyForDuplicateGeneralIdentities() {
+		Object special = new Object();
+		Object duplicateGeneral = new Object();
+		Object next = new Object();
+		Object later = new Object();
+		ParticleCandidate[] candidates = {
+				new ParticleCandidate(special, true, 100.0D, 0),
+				new ParticleCandidate(duplicateGeneral, false, 1.0D, 1),
+				new ParticleCandidate(duplicateGeneral, false, 1.5D, 2),
+				new ParticleCandidate(next, false, 2.0D, 3),
+				new ParticleCandidate(later, false, 3.0D, 4)
+		};
+		Set<Object> expected = legacyParticleSelection(candidates, 4, true, true);
+		Set<Object> actual = newIdentitySet();
+		SpillAwareParticleSelector<Object> selector = new SpillAwareParticleSelector<>();
+		selector.begin(4, true, true);
+		for (ParticleCandidate candidate : candidates) {
+			selector.offer(
+					candidate.value(),
+					candidate.special(),
+					candidate.distanceSquared() <= 64.0D,
+					candidate.distanceSquared(),
+					candidate.originalIndex()
+			);
+		}
+		require(!selector.finishFromSpill(actual, 1),
+				"duplicate general identities must request an exact bounded replay");
+		for (ParticleCandidate candidate : candidates) {
+			selector.offerReplay(
+					candidate.value(),
+					candidate.distanceSquared() <= 64.0D,
+					candidate.distanceSquared(),
+					candidate.originalIndex(),
+					actual
+			);
+		}
+		selector.completeReplay(actual);
+		require(sameIdentityMembership(expected, actual, candidates),
+				"duplicate replay must preserve the legacy identity-underfill behavior exactly");
+		for (ParticleCandidate candidate : candidates) {
+			require(!selector.retainsReferenceForTesting(candidate.value()),
+					"duplicate fallback completion must release every internal reference");
+		}
+
+		Object aborted = new Object();
+		selector.begin(2, true, true);
+		selector.offer(aborted, true, true, 1.0D, 0);
+		require(selector.retainsReferenceForTesting(aborted),
+				"active fused selection must retain its bounded candidate");
+		selector.abort();
+		require(!selector.retainsReferenceForTesting(aborted),
+				"failure and lifecycle aborts must release fused-selection references");
+	}
+
+	private static Set<Object> legacyParticleSelection(
+			ParticleCandidate[] candidates,
+			int budget,
+			boolean prioritizeDistance,
+			boolean preserveCritical
+	) {
+		int specialCount = 0;
+		for (ParticleCandidate candidate : candidates) {
+			if (candidate.special()) {
+				specialCount++;
+			}
+		}
+		ParticleBudgetPlan plan = ParticleBudgetPlan.create(budget, specialCount, preserveCritical);
+		Set<Object> selected = newIdentitySet();
+		BoundedTopK<Object> special = new BoundedTopK<>(
+				plan.specialReserveCapacity(),
+				prioritizeDistance
+		);
+		for (ParticleCandidate candidate : candidates) {
+			if (candidate.special()) {
+				special.offer(
+						candidate.value(), false, true,
+						candidate.distanceSquared(), candidate.originalIndex()
+				);
+			}
+		}
+		special.addTo(selected);
+		special.clear();
+		BoundedTopK<Object> general = new BoundedTopK<>(
+				plan.remainingCapacityAfter(selected.size()),
+				prioritizeDistance
+		);
+		for (ParticleCandidate candidate : candidates) {
+			if (!selected.contains(candidate.value())) {
+				general.offer(
+						candidate.value(), false,
+						preserveCritical && candidate.distanceSquared() <= 64.0D,
+						candidate.distanceSquared(), candidate.originalIndex()
+				);
+			}
+		}
+		general.addTo(selected);
+		general.clear();
+		return selected;
+	}
+
+	private static boolean sameIdentityMembership(
+			Set<Object> expected,
+			Set<Object> actual,
+			ParticleCandidate[] candidates
+	) {
+		if (expected.size() != actual.size()) {
+			return false;
+		}
+		for (ParticleCandidate candidate : candidates) {
+			if (expected.contains(candidate.value()) != actual.contains(candidate.value())) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private static void recyclesBoundedSelectorEntries() {
 		BoundedTopK<Object> selector = new BoundedTopK<>(3, true);
 		for (int index = 0; index < 1_000; index++) {
@@ -142,6 +337,49 @@ public final class AdaptiveBudgetControllerTest {
 		}
 		require(selector.size() == 3, "Selector must retain only its bounded capacity");
 		require(selector.allocatedEntryCount() == 3, "Selector must recycle entries instead of allocating per offer");
+	}
+
+	private static void keepsRankStorageLazyUntilARealCandidate() {
+		BoundedTopK<Object> selector = new BoundedTopK<>();
+		selector.reset(4_096, true);
+		require(selector.allocatedEntryCount() == 0,
+				"a large potential budget with zero eligible candidates must allocate no rank storage");
+		Object candidate = new Object();
+		selector.offer(candidate, false, false, 1.0D, 0);
+		int smallInitialCapacity = selector.allocatedEntryCount();
+		require(smallInitialCapacity > 0 && smallInitialCapacity <= 8,
+				"one eligible candidate after a coarse large bound must retain only small storage");
+		for (int index = 1; index < 5; index++) {
+			selector.offer(new Object(), false, false, index + 1.0D, index);
+		}
+		require(selector.allocatedEntryCount() == smallInitialCapacity,
+				"a few eligible candidates must reuse the small initial array group");
+		selector.clear();
+		require(!selector.retainsValueForTesting(candidate),
+				"clearing lazy rank storage must release its candidate reference");
+		selector.reset(32, true);
+		for (int index = 0; index < 96; index++) {
+			selector.offer(new Object(), false, false, 96.0D - index, index);
+		}
+		require(selector.size() == 32 && selector.allocatedEntryCount() == 32,
+				"a proven K-overload must grow geometrically to the exact bounded capacity");
+		int[] exactIndices = new int[32];
+		selector.copyOriginalIndices(exactIndices);
+		Arrays.sort(exactIndices);
+		for (int index = 0; index < exactIndices.length; index++) {
+			require(exactIndices[index] == index + 64,
+					"geometric growth must preserve exact nearest-candidate selection");
+		}
+		selector.clear();
+		int highWater = selector.allocatedEntryCount();
+		Object reused = new Object();
+		selector.reset(32, true);
+		selector.offer(reused, false, false, 1.0D, 0);
+		require(selector.allocatedEntryCount() == highWater,
+				"later cycles must reuse high-water storage without reallocating");
+		selector.clear();
+		require(!selector.retainsValueForTesting(reused),
+				"reused high-water storage must still release candidate references");
 	}
 
 	private static void reusesSelectorStorageAcrossFrames() {
@@ -185,6 +423,41 @@ public final class AdaptiveBudgetControllerTest {
 		);
 	}
 
+	private static void releasesSelectorStorageOnDurableDisable() {
+		BoundedTopK<Object> selector = new BoundedTopK<>(4_096, true);
+		for (int index = 0; index < 4_096; index++) {
+			selector.offer(new Object(), false, false, index, index);
+		}
+		require(selector.allocatedEntryCount() == 4_096,
+				"test setup must grow the reusable arrays to their high-water mark");
+		selector.releaseStorage();
+		require(selector.allocatedEntryCount() == 0 && selector.size() == 0,
+				"durable disable must release grown selector arrays");
+		selector.reset(2, true);
+		selector.offer(new Object(), false, false, 1.0D, 0);
+		require(selector.allocatedEntryCount() > 0 && selector.allocatedEntryCount() <= 2,
+				"later re-enable must recreate only the storage actually needed");
+	}
+
+	private static void releasesThreadStateAfterFinishedFrameDisable() {
+		GuardThreadState<Object> state = new GuardThreadState<>(Object::new);
+		require(state.peek() == null,
+				"disabled Guard must not initialize render-thread storage");
+		Object enabledFrame = state.acquire();
+		require(state.peek() == enabledFrame,
+				"an enabled frame lazily owns one render-thread state");
+		// Finishing a frame clears hot gates but intentionally retains reusable state.
+		require(state.peek() == enabledFrame,
+				"normal enabled frames must reuse high-water storage");
+		require(state.release() == enabledFrame && state.peek() == null,
+				"the first disabled frame must release state even after hot gates were cleared");
+		require(state.release() == null && state.peek() == null,
+				"stable disabled frames must neither allocate nor repeat cleanup");
+		require(state.acquire() != enabledFrame,
+				"re-enable must lazily create a fresh state");
+		state.release();
+	}
+
 	private static void preservesIdentityMembershipAcrossResets() {
 		EqualValue first = new EqualValue(1);
 		EqualValue equalButDistinct = new EqualValue(1);
@@ -203,6 +476,43 @@ public final class AdaptiveBudgetControllerTest {
 		selector.addTo(selected);
 		require(!selected.contains(first), "Reset membership must not retain equal objects from an older frame");
 		require(selected.contains(equalButDistinct), "Reset membership must contain the newly selected identity");
+	}
+
+	private static void selectsExactDuplicateOccurrencesByOriginalIndex() {
+		Object duplicate = new Object();
+		Object targeted = new Object();
+		Object equalButDistinct = new EqualValue(1);
+		BoundedTopK<Object> selector = new BoundedTopK<>();
+		require(selector.allocatedEntryCount() == 0,
+				"normal-load display scans must not initialize ranking storage");
+		selector.reset(3, true);
+		selector.offer(duplicate, false, false, 9.0D, 2);
+		selector.offer(equalButDistinct, false, false, 1.0D, 3);
+		selector.offer(duplicate, false, false, 4.0D, 4);
+		selector.offer(targeted, true, false, 100.0D, 5);
+		int[] selectedIndices = new int[3];
+		int selectedCount = selector.copyOriginalIndices(selectedIndices);
+		Arrays.sort(selectedIndices, 0, selectedCount);
+		require(selectedCount == 3 && Arrays.equals(selectedIndices, new int[]{3, 4, 5}),
+				"overload selection must enforce an exact occurrence cap with duplicate identities");
+		require(selector.allocatedEntryCount() == 3,
+				"first overload must use bounded primitive-array storage instead of entry wrappers");
+		selector.clear();
+		require(!selector.retainsValueForTesting(duplicate)
+					&& !selector.retainsValueForTesting(targeted),
+				"display selection scratch cleanup must release all candidate identities");
+		selector.reset(2, true);
+		selector.offer(targeted, true, false, 999.0D, 0);
+		selector.offer(equalButDistinct, false, true, 1.0D, 1);
+		selector.offer(new Object(), false, false, 0.0D, 2);
+		require(selector.allocatedEntryCount() == 3,
+				"later overloads must reuse the bounded high-water scratch storage");
+		int[] priorities = new int[2];
+		selector.copyOriginalIndices(priorities);
+		Arrays.sort(priorities);
+		require(Arrays.equals(priorities, new int[]{0, 1}),
+				"targeted and critical display priorities must remain deterministic");
+		selector.clear();
 	}
 
 	private static void coordinatesBlockEntityRankingWithoutASurvivorRescan() {
@@ -302,6 +612,14 @@ public final class AdaptiveBudgetControllerTest {
 	}
 
 	private record RankedState(int index) {
+	}
+
+	private record ParticleCandidate(
+			Object value,
+			boolean special,
+			double distanceSquared,
+			int originalIndex
+	) {
 	}
 
 	private static final class CountingArrayList<T> extends ArrayList<T> {

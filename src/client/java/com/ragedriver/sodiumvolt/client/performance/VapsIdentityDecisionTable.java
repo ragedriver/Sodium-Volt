@@ -5,8 +5,11 @@ package com.ragedriver.sodiumvolt.client.performance;
  * ledger. A missing entry always means fail open.
  */
 final class VapsIdentityDecisionTable<T> {
-	private static final byte SCANNED = 1;
-	private static final byte SELECTED = 2;
+	static final int UNKNOWN = 0;
+	static final int SCANNED = 1;
+	static final int SELECTED = 2;
+	static final int SATURATED_TOKEN = -1;
+	private static final int INSERTED_TOKEN_FLAG = 1 << 30;
 	private static final int MAX_PROBES = 64;
 
 	private final Object[] keys;
@@ -18,8 +21,11 @@ final class VapsIdentityDecisionTable<T> {
 	private int occupiedCount;
 
 	VapsIdentityDecisionTable(int capacity) {
-		if (capacity < 2 || Integer.bitCount(capacity) != 1) {
-			throw new IllegalArgumentException("capacity must be a power of two");
+		if (capacity < 2 || capacity >= INSERTED_TOKEN_FLAG
+				|| Integer.bitCount(capacity) != 1) {
+			throw new IllegalArgumentException(
+					"capacity must be a power of two below the token flag"
+			);
 		}
 		this.keys = new Object[capacity];
 		this.decisions = new byte[capacity];
@@ -36,11 +42,7 @@ final class VapsIdentityDecisionTable<T> {
 		}
 	}
 
-	boolean addScanned(T value) {
-		return this.addScannedResult(value) != AddResult.SATURATED;
-	}
-
-	AddResult addScannedResult(T value) {
+	int record(T value) {
 		int index = mix(System.identityHashCode(value)) & this.mask;
 		for (int probe = 0; probe < MAX_PROBES; probe++) {
 			if (this.generations[index] != this.generation) {
@@ -48,30 +50,34 @@ final class VapsIdentityDecisionTable<T> {
 				this.keys[index] = value;
 				this.decisions[index] = SCANNED;
 				this.occupiedSlots[this.occupiedCount++] = index;
-				return AddResult.INSERTED;
+				return index | INSERTED_TOKEN_FLAG;
 			}
 			if (this.keys[index] == value) {
-				return AddResult.EXISTING;
+				return index;
 			}
 			index = (index + 1) & this.mask;
 		}
-		return AddResult.SATURATED;
+		return SATURATED_TOKEN;
 	}
 
-	void select(T value) {
-		int index = find(value);
-		if (index >= 0) {
-			this.decisions[index] = SELECTED;
+	void selectRecorded(int token) {
+		if (token != SATURATED_TOKEN) {
+			this.decisions[token & ~INSERTED_TOKEN_FLAG] = SELECTED;
 		}
 	}
 
-	boolean isScanned(T value) {
-		return find(value) >= 0;
+	int decision(T value) {
+		int index = find(value);
+		return index < 0 ? UNKNOWN : this.decisions[index];
 	}
 
-	boolean isSelected(T value) {
-		int index = find(value);
-		return index >= 0 && this.decisions[index] == SELECTED;
+	boolean shouldRender(T value) {
+		int decision = decision(value);
+		return decision == UNKNOWN || decision == SELECTED;
+	}
+
+	static boolean wasInserted(int token) {
+		return token != SATURATED_TOKEN && (token & INSERTED_TOKEN_FLAG) != 0;
 	}
 
 	void releaseFrame() {
@@ -125,9 +131,4 @@ final class VapsIdentityDecisionTable<T> {
 		return value ^ value >>> 16;
 	}
 
-	enum AddResult {
-		INSERTED,
-		EXISTING,
-		SATURATED
-	}
 }

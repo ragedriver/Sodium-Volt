@@ -74,6 +74,10 @@ public final class VramAccountingLedger {
 		return this.spikeSignal.get();
 	}
 
+	public void clearSpikeSignal() {
+		this.spikeSignal.set(false);
+	}
+
 	public Snapshot snapshot() {
 		return new Snapshot(
 				this.textureBytes.get(),

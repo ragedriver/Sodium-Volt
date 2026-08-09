@@ -74,6 +74,8 @@ public final class SmartFpsConfig {
 	private volatile int powerPollIntervalSeconds = POWER_POLL_INTERVAL_DEFAULT;
 	private volatile boolean showStatusNotifications = true;
 	private volatile boolean showInspectorStatistics = true;
+	private transient volatile long runtimeRevision;
+	private transient volatile long inspectorStatisticsRevision;
 
 	private SmartFpsConfig() {
 	}
@@ -90,7 +92,8 @@ public final class SmartFpsConfig {
 		return this.smartFpsEnabled;
 	}
 
-	public void setSmartFpsEnabled(boolean value) {
+	public synchronized void setSmartFpsEnabled(boolean value) {
+		updateRuntime(this.smartFpsEnabled != value);
 		this.smartFpsEnabled = value;
 	}
 
@@ -98,17 +101,20 @@ public final class SmartFpsConfig {
 		return this.minimizedTargetFps;
 	}
 
-	public void setMinimizedTargetFps(int value) {
-		this.minimizedTargetFps = SmartFpsConfigNormalization.clamp(
+	public synchronized void setMinimizedTargetFps(int value) {
+		int normalized = SmartFpsConfigNormalization.clamp(
 				value, MINIMIZED_TARGET_MIN, MINIMIZED_TARGET_MAX
 		);
+		updateRuntime(this.minimizedTargetFps != normalized);
+		this.minimizedTargetFps = normalized;
 	}
 
 	public boolean isThrottleWhenMinimized() {
 		return this.throttleWhenMinimized;
 	}
 
-	public void setThrottleWhenMinimized(boolean value) {
+	public synchronized void setThrottleWhenMinimized(boolean value) {
+		updateRuntime(this.throttleWhenMinimized != value);
 		this.throttleWhenMinimized = value;
 	}
 
@@ -116,7 +122,8 @@ public final class SmartFpsConfig {
 		return this.throttleWhenUnfocused;
 	}
 
-	public void setThrottleWhenUnfocused(boolean value) {
+	public synchronized void setThrottleWhenUnfocused(boolean value) {
+		updateRuntime(this.throttleWhenUnfocused != value);
 		this.throttleWhenUnfocused = value;
 	}
 
@@ -124,27 +131,32 @@ public final class SmartFpsConfig {
 		return this.unfocusedTargetFps;
 	}
 
-	public void setUnfocusedTargetFps(int value) {
-		this.unfocusedTargetFps = SmartFpsConfigNormalization.clampStep(
+	public synchronized void setUnfocusedTargetFps(int value) {
+		int normalized = SmartFpsConfigNormalization.clampStep(
 				value, UNFOCUSED_TARGET_MIN, UNFOCUSED_TARGET_MAX, UNFOCUSED_TARGET_STEP
 		);
+		updateRuntime(this.unfocusedTargetFps != normalized);
+		this.unfocusedTargetFps = normalized;
 	}
 
 	public int getBackgroundActivationDelaySeconds() {
 		return this.backgroundActivationDelaySeconds;
 	}
 
-	public void setBackgroundActivationDelaySeconds(int value) {
-		this.backgroundActivationDelaySeconds = SmartFpsConfigNormalization.clamp(
+	public synchronized void setBackgroundActivationDelaySeconds(int value) {
+		int normalized = SmartFpsConfigNormalization.clamp(
 				value, BACKGROUND_DELAY_MIN, BACKGROUND_DELAY_MAX
 		);
+		updateRuntime(this.backgroundActivationDelaySeconds != normalized);
+		this.backgroundActivationDelaySeconds = normalized;
 	}
 
 	public boolean isBatteryMode() {
 		return this.batteryMode;
 	}
 
-	public void setBatteryMode(boolean value) {
+	public synchronized void setBatteryMode(boolean value) {
+		updateRuntime(this.batteryMode != value);
 		this.batteryMode = value;
 	}
 
@@ -152,17 +164,20 @@ public final class SmartFpsConfig {
 		return this.batteryTargetFps;
 	}
 
-	public void setBatteryTargetFps(int value) {
-		this.batteryTargetFps = SmartFpsConfigNormalization.clampStep(
+	public synchronized void setBatteryTargetFps(int value) {
+		int normalized = SmartFpsConfigNormalization.clampStep(
 				value, BATTERY_TARGET_MIN, BATTERY_TARGET_MAX, BATTERY_TARGET_STEP
 		);
+		updateRuntime(this.batteryTargetFps != normalized);
+		this.batteryTargetFps = normalized;
 	}
 
 	public boolean isBypassBatteryLimitWhileCharging() {
 		return this.bypassBatteryLimitWhileCharging;
 	}
 
-	public void setBypassBatteryLimitWhileCharging(boolean value) {
+	public synchronized void setBypassBatteryLimitWhileCharging(boolean value) {
+		updateRuntime(this.bypassBatteryLimitWhileCharging != value);
 		this.bypassBatteryLimitWhileCharging = value;
 	}
 
@@ -170,7 +185,8 @@ public final class SmartFpsConfig {
 		return this.lowBatteryProtection;
 	}
 
-	public void setLowBatteryProtection(boolean value) {
+	public synchronized void setLowBatteryProtection(boolean value) {
+		updateRuntime(this.lowBatteryProtection != value);
 		this.lowBatteryProtection = value;
 	}
 
@@ -178,46 +194,53 @@ public final class SmartFpsConfig {
 		return this.lowBatteryThresholdPercent;
 	}
 
-	public void setLowBatteryThresholdPercent(int value) {
-		this.lowBatteryThresholdPercent = SmartFpsConfigNormalization.clampStep(
+	public synchronized void setLowBatteryThresholdPercent(int value) {
+		int normalized = SmartFpsConfigNormalization.clampStep(
 				value,
 				LOW_BATTERY_THRESHOLD_MIN,
 				LOW_BATTERY_THRESHOLD_MAX,
 				LOW_BATTERY_THRESHOLD_STEP
 		);
+		updateRuntime(this.lowBatteryThresholdPercent != normalized);
+		this.lowBatteryThresholdPercent = normalized;
 	}
 
 	public int getLowBatteryTargetFps() {
 		return this.lowBatteryTargetFps;
 	}
 
-	public void setLowBatteryTargetFps(int value) {
-		this.lowBatteryTargetFps = SmartFpsConfigNormalization.clampStep(
+	public synchronized void setLowBatteryTargetFps(int value) {
+		int normalized = SmartFpsConfigNormalization.clampStep(
 				value,
 				LOW_BATTERY_TARGET_MIN,
 				LOW_BATTERY_TARGET_MAX,
 				LOW_BATTERY_TARGET_STEP
 		);
+		updateRuntime(this.lowBatteryTargetFps != normalized);
+		this.lowBatteryTargetFps = normalized;
 	}
 
 	public int getPowerPollIntervalSeconds() {
 		return this.powerPollIntervalSeconds;
 	}
 
-	public void setPowerPollIntervalSeconds(int value) {
-		this.powerPollIntervalSeconds = SmartFpsConfigNormalization.clampStep(
+	public synchronized void setPowerPollIntervalSeconds(int value) {
+		int normalized = SmartFpsConfigNormalization.clampStep(
 				value,
 				POWER_POLL_INTERVAL_MIN,
 				POWER_POLL_INTERVAL_MAX,
 				POWER_POLL_INTERVAL_STEP
 		);
+		updateRuntime(this.powerPollIntervalSeconds != normalized);
+		this.powerPollIntervalSeconds = normalized;
 	}
 
 	public boolean isShowStatusNotifications() {
 		return this.showStatusNotifications;
 	}
 
-	public void setShowStatusNotifications(boolean value) {
+	public synchronized void setShowStatusNotifications(boolean value) {
+		updateRuntime(this.showStatusNotifications != value);
 		this.showStatusNotifications = value;
 	}
 
@@ -225,12 +248,82 @@ public final class SmartFpsConfig {
 		return this.showInspectorStatistics;
 	}
 
-	public void setShowInspectorStatistics(boolean value) {
-		this.showInspectorStatistics = value;
+	public synchronized void setShowInspectorStatistics(boolean value) {
+		if (this.showInspectorStatistics != value) {
+			this.showInspectorStatistics = value;
+			this.runtimeRevision = ConfigFactoryDefaults.nextRevision(this.runtimeRevision);
+			this.inspectorStatisticsRevision = ConfigFactoryDefaults.nextRevision(
+					this.inspectorStatisticsRevision
+			);
+		}
+	}
+
+	public long inspectorStatisticsRevision() {
+		return this.inspectorStatisticsRevision;
+	}
+
+	public long runtimeRevision() {
+		return this.runtimeRevision;
+	}
+
+	public synchronized RuntimeSnapshot runtimeSnapshot() {
+		return new RuntimeSnapshot(
+				this.runtimeRevision,
+				this.smartFpsEnabled,
+				this.minimizedTargetFps,
+				this.throttleWhenMinimized,
+				this.throttleWhenUnfocused,
+				this.unfocusedTargetFps,
+				this.backgroundActivationDelaySeconds,
+				this.batteryMode,
+				this.batteryTargetFps,
+				this.bypassBatteryLimitWhileCharging,
+				this.lowBatteryProtection,
+				this.lowBatteryThresholdPercent,
+				this.lowBatteryTargetFps,
+				this.powerPollIntervalSeconds,
+				this.showStatusNotifications,
+				this.showInspectorStatistics,
+				this.inspectorStatisticsRevision
+		);
 	}
 
 	public synchronized void resetToFactoryDefaults() {
+		long previousRuntimeRevision = this.runtimeRevision;
+		boolean previousStatistics = this.showInspectorStatistics;
+		long previousStatisticsRevision = this.inspectorStatisticsRevision;
 		ConfigFactoryDefaults.copyMutableFields(this, new SmartFpsConfig());
+		this.runtimeRevision = ConfigFactoryDefaults.nextRevision(previousRuntimeRevision);
+		this.inspectorStatisticsRevision = this.showInspectorStatistics != previousStatistics
+				? ConfigFactoryDefaults.nextRevision(previousStatisticsRevision)
+				: previousStatisticsRevision;
+	}
+
+	private void updateRuntime(boolean changed) {
+		if (changed) {
+			this.runtimeRevision = ConfigFactoryDefaults.nextRevision(this.runtimeRevision);
+		}
+	}
+
+	public record RuntimeSnapshot(
+			long revision,
+			boolean enabled,
+			int minimizedTargetFps,
+			boolean throttleWhenMinimized,
+			boolean throttleWhenUnfocused,
+			int unfocusedTargetFps,
+			int backgroundActivationDelaySeconds,
+			boolean batteryMode,
+			int batteryTargetFps,
+			boolean bypassBatteryLimitWhileCharging,
+			boolean lowBatteryProtection,
+			int lowBatteryThresholdPercent,
+			int lowBatteryTargetFps,
+			int powerPollIntervalSeconds,
+			boolean showStatusNotifications,
+			boolean showInspectorStatistics,
+			long inspectorStatisticsRevision
+	) {
 	}
 
 	public synchronized void save() {

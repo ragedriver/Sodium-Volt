@@ -106,6 +106,11 @@ final class BlockEntityGuardHandoff<T> {
 		this.clear();
 	}
 
+	void releaseStorage() {
+		this.clear();
+		this.selection.releaseStorage();
+	}
+
 	int allocatedSelectionEntriesForTesting() {
 		return this.selection.allocatedEntryCount();
 	}

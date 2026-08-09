@@ -5,24 +5,29 @@ import com.ragedriver.sodiumvolt.client.config.ProfilesConfig;
 import com.ragedriver.sodiumvolt.client.performance.AdaptivePerformanceController;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
+import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.server.level.ParticleStatus;
 import net.minecraft.world.level.storage.LevelResource;
 
+import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Objects;
-import java.util.Optional;
 
 public final class PerformanceProfileEngine {
 	private static final ProfilesConfig CONFIG = ProfilesConfig.getInstance();
 	private static final Context MENU_CONTEXT = new Context(ContextKind.MENU, "");
+	private static final ProfileContextIdentityCache<Context> IDENTITY_CACHE =
+			new ProfileContextIdentityCache<>();
 
 	private static Context activeContext = MENU_CONTEXT;
 	private static ProfileSettings lastApplied;
-	private static boolean observedEnabled;
-	private static boolean runtimeFailed;
+	private static volatile boolean observedEnabled;
+	private static volatile boolean runtimeFailed;
 
 	private PerformanceProfileEngine() {
 	}
@@ -33,19 +38,31 @@ public final class PerformanceProfileEngine {
 	 */
 	public static void register() {
 		ClientTickEvents.END_CLIENT_TICK.register(PerformanceProfileEngine::onClientTick);
+		ClientPlayConnectionEvents.INIT.register(
+				PerformanceProfileEngine::onConnectionTransition
+		);
+		ClientPlayConnectionEvents.DISCONNECT.register(
+				PerformanceProfileEngine::onConnectionTransition
+		);
 		ClientLifecycleEvents.CLIENT_STOPPING.register(
 				PerformanceProfileEngine::onClientStopping
 		);
 	}
 
-	public static synchronized void onClientTick(Minecraft minecraft) {
+	public static void onClientTick(Minecraft minecraft) {
 		if (runtimeFailed || minecraft == null || minecraft.options == null
 				|| !minecraft.isSameThread()) {
 			return;
 		}
+		ProfilesConfig.RuntimeControl control = CONFIG.runtimeControl();
+		boolean configuredEnabled = control.enabled();
+		if (!ProfileTickGate.requiresUpdate(configuredEnabled, observedEnabled)) {
+			return;
+		}
 		try {
-			update(minecraft);
+			update(minecraft, control);
 		} catch (RuntimeException | LinkageError exception) {
+			IDENTITY_CACHE.clear();
 			runtimeFailed = true;
 			SodiumVolt.LOGGER.warn(
 					"Sodium Volt Profiles failed safely and stopped for this session"
@@ -56,26 +73,26 @@ public final class PerformanceProfileEngine {
 	public static synchronized boolean captureCurrentSinglePlayerProfile(
 			Minecraft minecraft
 	) {
-		Optional<Context> context = currentWorldContext(minecraft);
-		if (context.isEmpty() || context.get().kind != ContextKind.SINGLE_PLAYER) {
+		Context context = currentWorldContext(minecraft);
+		if (context == null || context.kind != ContextKind.SINGLE_PLAYER) {
 			return false;
 		}
 		ProfileSettings captured = capture(minecraft.options);
-		CONFIG.storeSinglePlayerProfile(context.get().key, captured);
-		if (context.get().equals(activeContext)) {
+		CONFIG.storeSinglePlayerProfile(context.key, captured);
+		if (context.equals(activeContext)) {
 			lastApplied = captured;
 		}
 		return CONFIG.saveChecked();
 	}
 
 	public static synchronized boolean captureCurrentServerProfile(Minecraft minecraft) {
-		Optional<Context> context = currentWorldContext(minecraft);
-		if (context.isEmpty() || context.get().kind != ContextKind.SERVER) {
+		Context context = currentWorldContext(minecraft);
+		if (context == null || context.kind != ContextKind.SERVER) {
 			return false;
 		}
 		ProfileSettings captured = capture(minecraft.options);
-		CONFIG.storeServerProfile(context.get().key, captured);
-		if (context.get().equals(activeContext)) {
+		CONFIG.storeServerProfile(context.key, captured);
+		if (context.equals(activeContext)) {
 			lastApplied = captured;
 		}
 		return CONFIG.saveChecked();
@@ -84,18 +101,18 @@ public final class PerformanceProfileEngine {
 	public static synchronized boolean forgetCurrentSinglePlayerProfile(
 			Minecraft minecraft
 	) {
-		Optional<Context> context = currentWorldContext(minecraft);
-		if (context.isEmpty() || context.get().kind != ContextKind.SINGLE_PLAYER
-				|| !CONFIG.forgetSinglePlayerProfile(context.get().key)) {
+		Context context = currentWorldContext(minecraft);
+		if (context == null || context.kind != ContextKind.SINGLE_PLAYER
+				|| !CONFIG.forgetSinglePlayerProfile(context.key)) {
 			return false;
 		}
 		return CONFIG.saveChecked();
 	}
 
 	public static synchronized boolean forgetCurrentServerProfile(Minecraft minecraft) {
-		Optional<Context> context = currentWorldContext(minecraft);
-		if (context.isEmpty() || context.get().kind != ContextKind.SERVER
-				|| !CONFIG.forgetServerProfile(context.get().key)) {
+		Context context = currentWorldContext(minecraft);
+		if (context == null || context.kind != ContextKind.SERVER
+				|| !CONFIG.forgetServerProfile(context.key)) {
 			return false;
 		}
 		return CONFIG.saveChecked();
@@ -119,6 +136,7 @@ public final class PerformanceProfileEngine {
 			ProfileSettings baseline
 	) {
 		activeContext = MENU_CONTEXT;
+		IDENTITY_CACHE.clear();
 		lastApplied = null;
 		observedEnabled = false;
 		runtimeFailed = false;
@@ -154,9 +172,10 @@ public final class PerformanceProfileEngine {
 		return changed;
 	}
 
-	private static void update(Minecraft minecraft) {
-		boolean enabled = CONFIG.isProfilesEnabled();
+	private static void update(Minecraft minecraft, ProfilesConfig.RuntimeControl control) {
+		boolean enabled = control.enabled();
 		if (!enabled) {
+			IDENTITY_CACHE.clear();
 			if (observedEnabled && lastApplied != null) {
 				restoreGlobalDefaults(minecraft, true);
 			}
@@ -172,13 +191,13 @@ public final class PerformanceProfileEngine {
 			}
 		}
 
-		Optional<Context> detected = currentWorldContext(minecraft);
-		Context desired = detected.orElse(MENU_CONTEXT);
+		Context detected = currentWorldContext(minecraft, control.identityContextRevision());
+		Context desired = detected == null ? MENU_CONTEXT : detected;
 		if (activeContext.kind != ContextKind.MENU
 				&& !ProfileContextPolicy.isEnabled(
 						activeContext.kind.policyKind,
-						CONFIG.isSinglePlayerProfilesEnabled(),
-						CONFIG.isSpecificServerProfilesEnabled()
+						control.singlePlayerProfilesEnabled(),
+						control.specificServerProfilesEnabled()
 				)) {
 			restoreGlobalDefaults(minecraft, true);
 			activeContext = MENU_CONTEXT;
@@ -248,30 +267,110 @@ public final class PerformanceProfileEngine {
 		lastApplied = null;
 	}
 
-	private static Optional<Context> currentWorldContext(Minecraft minecraft) {
+	private static Context currentWorldContext(Minecraft minecraft) {
+		return currentWorldContext(minecraft, CONFIG.runtimeControl().identityContextRevision());
+	}
+
+	private static Context currentWorldContext(
+			Minecraft minecraft,
+			long contextRevision
+	) {
 		if (minecraft == null || minecraft.options == null || minecraft.level == null) {
-			return Optional.empty();
+			IDENTITY_CACHE.clear();
+			return null;
 		}
-		byte[] salt = CONFIG.identitySalt();
+		Object level = minecraft.level;
+		ClientPacketListener connection = minecraft.getConnection();
 		IntegratedServer integratedServer = minecraft.getSingleplayerServer();
 		if (integratedServer != null) {
-			String worldStorageIdentity = integratedServer.getWorldPath(LevelResource.ROOT)
-					.toAbsolutePath()
-					.normalize()
-					.toString();
-			return ProfileIdentity.singlePlayerKey(worldStorageIdentity, salt)
-					.map(key -> new Context(ContextKind.SINGLE_PLAYER, key));
+			// MinecraftServer owns a final storage source. A different storage root therefore
+			// arrives with a different IntegratedServer token; startup exceptions are retried.
+			if (IDENTITY_CACHE.matches(
+					ProfileContextIdentityCache.SourceKind.SINGLE_PLAYER,
+					level, connection, integratedServer, null, contextRevision
+			)) {
+				return IDENTITY_CACHE.value();
+			}
+			ContextDerivation derivation = deriveSinglePlayerContext(integratedServer);
+			if (derivation.cacheable()) {
+				IDENTITY_CACHE.store(
+						ProfileContextIdentityCache.SourceKind.SINGLE_PLAYER,
+						level, connection, integratedServer, null, contextRevision,
+						derivation.context()
+				);
+			}
+			return derivation.context();
 		}
-		ServerData server = minecraft.getCurrentServer();
+		ServerData server = connection == null ? null : connection.getServerData();
 		if (server == null) {
-			return Optional.empty();
+			IDENTITY_CACHE.clear();
+			return null;
 		}
-		return ProfileIdentity.serverKey(server.ip, salt)
-				.map(key -> new Context(ContextKind.SERVER, key));
+		String address = server.ip;
+		if (IDENTITY_CACHE.matches(
+				ProfileContextIdentityCache.SourceKind.SERVER,
+				level, connection, server, address, contextRevision
+		)) {
+			return IDENTITY_CACHE.value();
+		}
+		Context derived = deriveServerContext(address);
+		// Invalid immutable address strings are cached as unavailable until a token changes.
+		IDENTITY_CACHE.store(
+				ProfileContextIdentityCache.SourceKind.SERVER,
+				level, connection, server, address, contextRevision, derived
+		);
+		return derived;
+	}
+
+	private static ContextDerivation deriveSinglePlayerContext(
+			IntegratedServer integratedServer
+	) {
+		Path worldRoot;
+		try {
+			worldRoot = integratedServer.getWorldPath(LevelResource.ROOT);
+		} catch (RuntimeException exception) {
+			// Startup can expose the client level before integrated storage is ready.
+			return ContextDerivation.RETRY;
+		}
+		String worldStorageIdentity;
+		try {
+			worldStorageIdentity = worldRoot.toAbsolutePath().normalize().toString();
+		} catch (RuntimeException exception) {
+			return ContextDerivation.INVALID;
+		}
+		return new ContextDerivation(
+				deriveContext(ContextKind.SINGLE_PLAYER, worldStorageIdentity), true
+		);
+	}
+
+	private static Context deriveServerContext(String address) {
+		return deriveContext(ContextKind.SERVER, address);
+	}
+
+	private static Context deriveContext(ContextKind kind, String rawIdentity) {
+		byte[] salt = CONFIG.identitySalt();
+		try {
+			String key = (kind == ContextKind.SINGLE_PLAYER
+					? ProfileIdentity.singlePlayerKey(rawIdentity, salt)
+					: ProfileIdentity.serverKey(rawIdentity, salt)).orElse(null);
+			return key == null ? null : new Context(kind, key);
+		} finally {
+			Arrays.fill(salt, (byte) 0);
+		}
+	}
+
+	private static synchronized void onConnectionTransition(
+			ClientPacketListener listener,
+			Minecraft minecraft
+	) {
+		Objects.requireNonNull(listener, "listener");
+		Objects.requireNonNull(minecraft, "minecraft");
+		IDENTITY_CACHE.clear();
 	}
 
 	private static void onClientStopping(Minecraft minecraft) {
 		synchronized (PerformanceProfileEngine.class) {
+			IDENTITY_CACHE.clear();
 			if (lastApplied != null) {
 				try {
 					restoreGlobalDefaults(minecraft, true);
@@ -328,5 +427,12 @@ public final class PerformanceProfileEngine {
 			Objects.requireNonNull(kind, "kind");
 			Objects.requireNonNull(key, "key");
 		}
+	}
+
+	private record ContextDerivation(Context context, boolean cacheable) {
+		private static final ContextDerivation RETRY =
+				new ContextDerivation(null, false);
+		private static final ContextDerivation INVALID =
+				new ContextDerivation(null, true);
 	}
 }

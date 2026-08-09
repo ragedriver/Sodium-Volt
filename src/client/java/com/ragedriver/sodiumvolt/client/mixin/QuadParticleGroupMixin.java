@@ -1,7 +1,9 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.guard.VoltGuardEngine;
+import com.ragedriver.sodiumvolt.client.guard.VoltGuardHotPathGate;
 import com.ragedriver.sodiumvolt.client.performance.VisibilityAwareParticleScheduler;
+import com.ragedriver.sodiumvolt.client.performance.VapsHotPathGate;
 import net.minecraft.client.Camera;
 import net.minecraft.client.particle.QuadParticleGroup;
 import net.minecraft.client.particle.SingleQuadParticle;
@@ -27,8 +29,10 @@ public abstract class QuadParticleGroupMixin {
 			Camera camera,
 			float partialTickTime
 	) {
-		if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)
-				&& VoltGuardEngine.shouldExtractParticle(particle)) {
+		boolean vaps = VapsHotPathGate.renderActive();
+		boolean guard = VoltGuardHotPathGate.particleFilterActive();
+		if ((!vaps || VisibilityAwareParticleScheduler.shouldRenderParticle(particle))
+				&& (!guard || VoltGuardEngine.shouldExtractParticle(particle))) {
 			particle.extract(renderState, camera, partialTickTime);
 		}
 	}

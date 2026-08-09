@@ -1,11 +1,18 @@
 package com.ragedriver.sodiumvolt.client.resourcepack;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
 public final class ShieldReadBudget {
 	private final long maximumBytes;
-	private long consumedBytes;
-	private long reservedBytes;
-	private boolean detectionReserved;
-	private boolean exceeded;
+	private final AtomicLong consumedBytes = new AtomicLong();
+	private final AtomicLong claimedBytes = new AtomicLong();
+	private final AtomicBoolean detectionReserved = new AtomicBoolean();
+	private final AtomicBoolean exceeded = new AtomicBoolean();
+	private final AtomicInteger exhaustedWaiters = new AtomicInteger();
+	private final AtomicLong slowPathEntries = new AtomicLong();
+	private final Object exhaustionMonitor = new Object();
 
 	public ShieldReadBudget(long maximumBytes) {
 		this.maximumBytes = Math.max(1L, maximumBytes);
@@ -22,52 +29,76 @@ public final class ShieldReadBudget {
 		if (requestedBytes <= 0L) {
 			throw new IllegalArgumentException("A read reservation must be positive");
 		}
-		synchronized (this) {
-			while (true) {
-				if (this.exceeded) {
-					reservation.activate(0L, false, true);
-					return;
-				}
+		while (true) {
+			if (this.exceeded.get()) {
+				reservation.activate(0L, false, true);
+				return;
+			}
 
-				long remaining = this.maximumBytes - this.consumedBytes;
-				long available = remaining - this.reservedBytes;
-				if (available > 0L) {
-					long granted = Math.min(requestedBytes, available);
-					this.reservedBytes += granted;
+			long claimed = this.claimedBytes.get();
+			if (claimed < this.maximumBytes) {
+				long granted = Math.min(requestedBytes, this.maximumBytes - claimed);
+				if (this.claimedBytes.compareAndSet(claimed, claimed + granted)) {
 					reservation.activate(granted, false, false);
 					return;
 				}
+				continue;
+			}
 
-				if (this.reservedBytes > 0L || this.detectionReserved) {
-					wait();
-					continue;
-				}
-
-				// All allowed bytes were committed. Exactly one stream may read the
-				// detection byte that proves the aggregate limit was exceeded.
-				this.detectionReserved = true;
-				reservation.activate(1L, true, false);
+			if (awaitCapacityOrReserveDetection(reservation)) {
 				return;
 			}
 		}
 	}
 
-	public synchronized long consumedBytes() {
-		return this.consumedBytes;
+	private boolean awaitCapacityOrReserveDetection(
+			Reservation reservation
+	) throws InterruptedException {
+		this.slowPathEntries.incrementAndGet();
+		this.exhaustedWaiters.incrementAndGet();
+		try {
+			synchronized (this.exhaustionMonitor) {
+				while (true) {
+					if (this.exceeded.get()) {
+						reservation.activate(0L, false, true);
+						return true;
+					}
+					long claimed = this.claimedBytes.get();
+					if (claimed < this.maximumBytes) {
+						return false;
+					}
+					if (this.consumedBytes.get() == this.maximumBytes
+							&& this.detectionReserved.compareAndSet(false, true)) {
+						// One bounded byte proves that aggregate progress continued past
+						// the exact maximum. Other exhausted readers wait for its result.
+						reservation.activate(1L, true, false);
+						return true;
+					}
+					this.exhaustionMonitor.wait();
+				}
+			}
+		} finally {
+			this.exhaustedWaiters.decrementAndGet();
+		}
 	}
 
-	public synchronized long remainingBytes() {
-		return Math.max(
-				0L,
-				this.maximumBytes - this.consumedBytes - this.reservedBytes
-		);
+	public long consumedBytes() {
+		return this.consumedBytes.get();
 	}
 
-	synchronized boolean exceeded() {
-		return this.exceeded;
+	public long remainingBytes() {
+		return Math.max(0L, this.maximumBytes - this.claimedBytes.get());
 	}
 
-	private synchronized boolean reconcile(
+	boolean exceeded() {
+		return this.exceeded.get();
+	}
+
+	long slowPathEntriesForTesting() {
+		return this.slowPathEntries.get();
+	}
+
+	private boolean reconcile(
 			long allowance,
 			boolean detection,
 			long actualBytes
@@ -76,26 +107,40 @@ public final class ShieldReadBudget {
 			throw new IllegalArgumentException("Read progress exceeds its reservation");
 		}
 
-		boolean accepted = true;
 		if (detection) {
-			if (!this.detectionReserved) {
+			if (!this.detectionReserved.get()) {
 				throw new IllegalStateException("Detection reservation was already released");
 			}
-			this.detectionReserved = false;
-			if (actualBytes > 0L) {
-				this.consumedBytes = this.maximumBytes;
-				this.exceeded = true;
-				accepted = false;
+			boolean accepted = actualBytes == 0L;
+			if (!accepted) {
+				this.exceeded.set(true);
 			}
-		} else {
-			if (allowance > this.reservedBytes) {
+			this.detectionReserved.set(false);
+			signalExhaustedWaiters();
+			return accepted;
+		}
+
+		this.consumedBytes.addAndGet(actualBytes);
+		long unused = allowance - actualBytes;
+		if (unused != 0L) {
+			long claimed = this.claimedBytes.addAndGet(-unused);
+			if (claimed < 0L) {
 				throw new IllegalStateException("Read reservation was already released");
 			}
-			this.reservedBytes -= allowance;
-			this.consumedBytes += actualBytes;
 		}
-		notifyAll();
-		return accepted;
+		// When the limit is fully committed this wakes one detector; when a
+		// short read returns allowance it wakes all contenders for the CAS path.
+		signalExhaustedWaiters();
+		return true;
+	}
+
+	private void signalExhaustedWaiters() {
+		if (this.exhaustedWaiters.get() == 0) {
+			return;
+		}
+		synchronized (this.exhaustionMonitor) {
+			this.exhaustionMonitor.notifyAll();
+		}
 	}
 
 	static final class Reservation implements AutoCloseable {
@@ -104,12 +149,13 @@ public final class ShieldReadBudget {
 		private boolean detection;
 		private boolean exhausted;
 		private boolean active;
+		private long consumed;
 
 		private Reservation(ShieldReadBudget budget) {
 			this.budget = budget;
 		}
 
-		synchronized Reservation acquire(long requestedBytes) throws InterruptedException {
+		Reservation acquire(long requestedBytes) throws InterruptedException {
 			if (this.active) {
 				throw new IllegalStateException("Read reservation is already active");
 			}
@@ -122,36 +168,58 @@ public final class ShieldReadBudget {
 			this.detection = detection;
 			this.exhausted = exhausted;
 			this.active = true;
+			this.consumed = 0L;
 		}
 
-		synchronized long allowance() {
-			ensureActive();
-			return this.allowance;
-		}
-
-		synchronized boolean exhausted() {
+		boolean exhausted() {
 			ensureActive();
 			return this.exhausted;
 		}
 
-		synchronized boolean commit(long actualBytes) {
+		boolean commit(long actualBytes) {
+			boolean accepted = consume(actualBytes);
+			if (this.active) {
+				close();
+			}
+			return accepted;
+		}
+
+		boolean consume(long actualBytes) {
 			ensureActive();
 			if (this.exhausted) {
 				deactivate();
 				return false;
 			}
-			boolean accepted = this.budget.reconcile(
-					this.allowance, this.detection, actualBytes
-			);
-			deactivate();
-			return accepted;
+			if (actualBytes < 0L || actualBytes > this.allowance - this.consumed) {
+				throw new IllegalArgumentException("Read progress exceeds its reservation");
+			}
+			this.consumed += actualBytes;
+			if (this.detection || this.consumed == this.allowance) {
+				boolean accepted = this.budget.reconcile(
+						this.allowance, this.detection, this.consumed
+				);
+				deactivate();
+				return accepted;
+			}
+			return true;
+		}
+
+		long remainingAllowance() {
+			ensureActive();
+			return this.allowance - this.consumed;
+		}
+
+		boolean active() {
+			return this.active;
 		}
 
 		@Override
-		public synchronized void close() {
+		public void close() {
 			if (this.active) {
 				if (!this.exhausted) {
-					this.budget.reconcile(this.allowance, this.detection, 0L);
+					this.budget.reconcile(
+							this.allowance, this.detection, this.consumed
+					);
 				}
 				deactivate();
 			}
@@ -168,6 +236,7 @@ public final class ShieldReadBudget {
 			this.detection = false;
 			this.exhausted = false;
 			this.active = false;
+			this.consumed = 0L;
 		}
 	}
 }

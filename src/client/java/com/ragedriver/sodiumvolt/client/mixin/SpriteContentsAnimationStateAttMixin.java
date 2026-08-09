@@ -5,7 +5,6 @@ import com.ragedriver.sodiumvolt.client.performance.AttAnimationCycleContext;
 import com.ragedriver.sodiumvolt.client.performance.AttAnimationStateExtension;
 import net.minecraft.client.renderer.texture.SpriteContents;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
-import net.minecraft.resources.Identifier;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -36,15 +35,13 @@ public abstract class SpriteContentsAnimationStateAttMixin
 	@Inject(method = "tick()V", at = @At("HEAD"), cancellable = true)
 	private void sodiumVolt$gateAnimatedTextureTick(CallbackInfo callbackInfo) {
 		this.sodiumVolt$pendingCompletedTick = null;
-		Identifier atlasLocation = AttAnimationCycleContext.atlasLocation();
-		if (atlasLocation == null || this.sodiumVolt$animatedSprite == null) {
+		if (!AttAnimationCycleContext.hasActiveCycle()
+				|| this.sodiumVolt$animatedSprite == null) {
 			return;
 		}
 		AnimatedTextureThrottleEngine.TickGate gate =
 				AnimatedTextureThrottleEngine.gateStateTick(
-						atlasLocation,
-						this.sodiumVolt$animatedSprite,
-						AttAnimationCycleContext.isWarmup()
+						this.sodiumVolt$animatedSprite
 				);
 		if (gate == AnimatedTextureThrottleEngine.TickGate.SKIP) {
 			callbackInfo.cancel();

@@ -22,9 +22,10 @@ public final class VramPressureProtectionEngine {
 	private static final VoltPerformanceConfig CONFIG = VoltPerformanceConfig.getInstance();
 	private static final VramPressureStateMachine STATE = new VramPressureStateMachine();
 	private static final VramRenderDistanceCap RENDER_DISTANCE_CAP = new VramRenderDistanceCap();
+	private static final VramRuntimeFailureGate FAILURE_GATE =
+			new VramRuntimeFailureGate();
 
-	private static boolean active;
-	private static boolean runtimeFailed;
+	private static volatile boolean active;
 	private static boolean failureLogged;
 	private static boolean budgetProbed;
 	private static int automaticBudgetMib = VramAutoBudgetHeuristic.FALLBACK_BUDGET_MIB;
@@ -42,24 +43,36 @@ public final class VramPressureProtectionEngine {
 	}
 
 	public static void register() {
-		updateSpikeThreshold();
+		boolean enabledAtStartup = CONFIG.isVramPressureProtectionEnabled();
+		VramAllocationTracker.initialize(enabledAtStartup);
+		if (enabledAtStartup) {
+			updateSpikeThreshold();
+		}
 		ClientLifecycleEvents.CLIENT_STOPPING.register(VramPressureProtectionEngine::onClientStopping);
+	}
+
+	public static boolean requiresRenderFrameTimestamp() {
+		boolean enabled = CONFIG.isVramPressureProtectionEnabled();
+		boolean transition = VramAllocationTracker.requiresTrackingTransition(enabled);
+		boolean runnable = enabled
+				&& (VramAllocationTracker.hasCompleteBaseline() || transition);
+		return FAILURE_GATE.requiresRenderFrame(runnable, active) || transition;
 	}
 
 	public static void onRenderFrame(Minecraft minecraft, long nowNanos) {
 		if (Thread.currentThread() != minecraft.getRunningThread()) {
 			return;
 		}
-		if (runtimeFailed) {
+		if (FAILURE_GATE.failed()) {
 			if (!CONFIG.isVramPressureProtectionEnabled()) {
-				runtimeFailed = false;
+				FAILURE_GATE.clear();
 			}
 			return;
 		}
 		try {
 			update(minecraft, nowNanos);
 		} catch (RuntimeException | LinkageError exception) {
-			runtimeFailed = true;
+			FAILURE_GATE.fail();
 			failMetricOnce();
 			deactivate(minecraft, true);
 		}
@@ -78,8 +91,17 @@ public final class VramPressureProtectionEngine {
 
 	private static void update(Minecraft minecraft, long nowNanos) {
 		if (!CONFIG.isVramPressureProtectionEnabled()) {
+			VramAllocationTracker.publishEnabled(false);
 			if (active || RENDER_DISTANCE_CAP.isActive()) {
 				deactivate(minecraft, true);
+			}
+			return;
+		}
+		VramAllocationTracker.publishEnabled(true);
+		if (!VramAllocationTracker.hasCompleteBaseline()) {
+			failMetricOnce();
+			if (active || RENDER_DISTANCE_CAP.isActive()) {
+				deactivateRuntime(minecraft, true);
 			}
 			return;
 		}
@@ -113,6 +135,11 @@ public final class VramPressureProtectionEngine {
 			VramAllocationTracker.consumeSpikeSignal();
 		}
 		VramAccountingLedger.Snapshot tracked = VramAllocationTracker.snapshot();
+		if (!VramAllocationTracker.hasCompleteBaseline()) {
+			failMetricOnce();
+			failOpenMetric(minecraft, tracked);
+			return;
+		}
 		long trackedBytes = tracked.totalBytes();
 		if (trackedBytes == Long.MAX_VALUE) {
 			failMetricOnce();
@@ -151,7 +178,8 @@ public final class VramPressureProtectionEngine {
 			applySafeProfile(minecraft, nowNanos);
 		}
 		maybeWarn(minecraft, transition, nowNanos, validWorld);
-		statistics = new StatisticsSnapshot(
+		if (CONFIG.isVramShowInspectorStatistics()) {
+			statistics = new StatisticsSnapshot(
 				estimatedBytes,
 				budgetBytes,
 				pressurePercent(estimatedBytes, budgetBytes),
@@ -168,7 +196,10 @@ public final class VramPressureProtectionEngine {
 				STATE.level(),
 				budget.source(),
 				false
-		);
+			);
+		} else if (statistics != StatisticsSnapshot.EMPTY) {
+			statistics = StatisticsSnapshot.EMPTY;
+		}
 	}
 
 	private static void applySafeProfile(Minecraft minecraft, long nowNanos) {
@@ -309,6 +340,11 @@ public final class VramPressureProtectionEngine {
 	}
 
 	private static void deactivate(Minecraft minecraft, boolean restoreOwned) {
+		VramAllocationTracker.publishEnabled(false);
+		deactivateRuntime(minecraft, restoreOwned);
+	}
+
+	private static void deactivateRuntime(Minecraft minecraft, boolean restoreOwned) {
 		releaseSafeProfile(
 				minecraft,
 				restoreOwned && CONFIG.isVramRestoreQualityAfterRecovery()
@@ -336,6 +372,12 @@ public final class VramPressureProtectionEngine {
 	}
 
 	private static void onClientStopping(Minecraft minecraft) {
+		// The failure latch is process-static, so clear it before any inactive fast return.
+		FAILURE_GATE.clear();
+		VramAllocationTracker.publishEnabled(false);
+		if (!active && !RENDER_DISTANCE_CAP.isActive()) {
+			return;
+		}
 		try {
 			boolean hadCap = RENDER_DISTANCE_CAP.isActive();
 			deactivate(minecraft, true);
@@ -353,7 +395,8 @@ public final class VramPressureProtectionEngine {
 	) {
 		releaseSafeProfile(minecraft, CONFIG.isVramRestoreQualityAfterRecovery());
 		STATE.reset();
-		statistics = new StatisticsSnapshot(
+		if (CONFIG.isVramShowInspectorStatistics()) {
+			statistics = new StatisticsSnapshot(
 				-1L,
 				-1L,
 				-1,
@@ -372,7 +415,10 @@ public final class VramPressureProtectionEngine {
 						? automaticBudgetSource
 						: BudgetSource.MANUAL,
 				true
-		);
+			);
+		} else if (statistics != StatisticsSnapshot.EMPTY) {
+			statistics = StatisticsSnapshot.EMPTY;
+		}
 	}
 
 	private static void failMetricOnce() {
@@ -381,7 +427,8 @@ public final class VramPressureProtectionEngine {
 		}
 		failureLogged = true;
 		SodiumVolt.LOGGER.warn(
-				"VRAM Pressure Protection could not obtain a reliable estimate and will fail open"
+				"VRAM Pressure Protection has no complete startup allocation baseline; "
+						+ "its backend will remain dormant until Minecraft is restarted with it enabled"
 		);
 	}
 

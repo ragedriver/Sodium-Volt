@@ -10,6 +10,7 @@ import java.util.List;
  * logical paths. Longest component depth wins for nested declarations.
  */
 public final class ShieldOverlayPlan {
+	static final int MAXIMUM_OVERLAY_PREFIXES = 64;
 	public static final ShieldOverlayPlan EMPTY = new ShieldOverlayPlan(List.of());
 	private final List<String> prefixes;
 
@@ -58,6 +59,9 @@ public final class ShieldOverlayPlan {
 				return new Validation(ShieldReason.UNSAFE_PATH, EMPTY);
 			}
 			unique.add(prefix);
+			if (unique.size() > MAXIMUM_OVERLAY_PREFIXES) {
+				return new Validation(ShieldReason.ENTRY_LIMIT, EMPTY);
+			}
 		}
 		ArrayList<String> ordered = new ArrayList<>(unique);
 		ordered.sort(

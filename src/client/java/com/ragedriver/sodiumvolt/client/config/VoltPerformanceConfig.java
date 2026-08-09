@@ -12,6 +12,7 @@ import com.ragedriver.sodiumvolt.client.performance.ApcConfigNormalization;
 import com.ragedriver.sodiumvolt.client.performance.AttExemptionParsing;
 import com.ragedriver.sodiumvolt.client.performance.BlockEntityBudgetNormalization;
 import com.ragedriver.sodiumvolt.client.performance.VramConfigNormalization;
+import com.ragedriver.sodiumvolt.client.performance.VoltTunerProfile;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
@@ -162,6 +163,7 @@ public final class VoltPerformanceConfig {
 			.create();
 
 	private final int version = CONFIG_VERSION;
+	private volatile VoltTunerProfile tunerProfile = VoltTunerProfile.VOLT_DEFAULT;
 	private volatile boolean adaptivePerformanceControllerEnabled;
 	private volatile Profile profile = Profile.BALANCED;
 	private volatile int targetFps = TARGET_FPS_DEFAULT;
@@ -255,6 +257,19 @@ public final class VoltPerformanceConfig {
 
 	public boolean isAdaptivePerformanceControllerEnabled() {
 		return this.adaptivePerformanceControllerEnabled;
+	}
+
+	public VoltTunerProfile getTunerProfile() {
+		return this.tunerProfile;
+	}
+
+	/**
+	 * Records the selected tuner preset. Applying a preset is owned by
+	 * {@code VoltTunerProfileController}, so config loading and ordinary runtime
+	 * reads can never rewrite a user's settings.
+	 */
+	public void setTunerProfile(VoltTunerProfile value) {
+		this.tunerProfile = value == null ? VoltTunerProfile.VOLT_DEFAULT : value;
 	}
 
 	public void setAdaptivePerformanceControllerEnabled(boolean value) {
@@ -1058,6 +1073,7 @@ public final class VoltPerformanceConfig {
 						"adaptive_performance_controller_enabled",
 						config.adaptivePerformanceControllerEnabled
 				);
+				config.tunerProfile = readTunerProfile(root, "tuner_profile", config.tunerProfile);
 				config.profile = readProfile(root, "profile", config.profile);
 				config.targetFps = readInteger(root, "target_fps", config.targetFps);
 				config.adaptiveRenderDistance = readBoolean(
@@ -1366,12 +1382,29 @@ public final class VoltPerformanceConfig {
 		}
 	}
 
+	private static VoltTunerProfile readTunerProfile(
+			JsonObject root,
+			String key,
+			VoltTunerProfile defaultValue
+	) {
+		JsonPrimitive primitive = primitive(root, key);
+		if (primitive == null || !primitive.isString()) {
+			return defaultValue;
+		}
+		try {
+			return VoltTunerProfile.valueOf(primitive.getAsString().toUpperCase(Locale.ROOT));
+		} catch (IllegalArgumentException exception) {
+			return defaultValue;
+		}
+	}
+
 	private static JsonPrimitive primitive(JsonObject root, String key) {
 		JsonElement element = root.get(key);
 		return element != null && element.isJsonPrimitive() ? element.getAsJsonPrimitive() : null;
 	}
 
 	private void validate() {
+		this.setTunerProfile(this.tunerProfile);
 		this.setProfile(this.profile);
 		this.setTargetFps(this.targetFps);
 		ApcConfigNormalization.DistanceBounds normalizedDistances =

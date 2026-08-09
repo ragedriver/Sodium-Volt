@@ -7,10 +7,11 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class ResourcePackShieldSession {
+	private static final int MAXIMUM_DIRECTORY_CACHE_ENTRIES = 2_048;
 	private final ShieldSourceKind source;
 	private final ResourcePackShieldPolicy policy;
 	private final long configRevision;
@@ -18,10 +19,11 @@ final class ResourcePackShieldSession {
 	private final ResourcePackShieldEngine.ReloadToken reloadToken;
 	private final Path archivePath;
 	private final ShieldArchiveOpenGate archiveOpenGate;
-	private final List<Path> directoryRoots;
+	private final DirectoryCandidateValidator.Cache directoryValidationCache;
 	private final ShieldReadBudget readBudget;
 	private final AtomicInteger resourceOutputs = new AtomicInteger();
 	private final AtomicBoolean rejected = new AtomicBoolean();
+	private final AtomicBoolean closed = new AtomicBoolean();
 
 	ResourcePackShieldSession(
 			ShieldSourceKind source,
@@ -41,7 +43,10 @@ final class ResourcePackShieldSession {
 				: reloadToken;
 		this.archivePath = archivePath;
 		this.archiveOpenGate = archivePath == null ? null : new ShieldArchiveOpenGate();
-		this.directoryRoots = directoryRoots;
+		this.directoryValidationCache = DirectoryCandidateValidator.newCache(
+				directoryRoots,
+				Math.min(MAXIMUM_DIRECTORY_CACHE_ENTRIES, policy.maximumEntries())
+		);
 		this.readBudget = new ShieldReadBudget(policy.maximumTotalResourceBytes());
 	}
 
@@ -61,10 +66,46 @@ final class ResourcePackShieldSession {
 		return this.readBudget;
 	}
 
+	boolean isDirectorySource() {
+		return this.archivePath == null;
+	}
+
+	InputStream openDirectoryResource(String logicalPath, boolean primaryOnly)
+			throws IOException {
+		DirectoryCandidateValidator.SecureOpenResult result;
+		try {
+			result = this.directoryValidationCache.openFile(logicalPath, primaryOnly);
+		} catch (IOException | RuntimeException exception) {
+			if (onViolation(ShieldReason.MONITOR_FAILURE)) {
+				throw new IOException("Directory resource provider failed secure open", exception);
+			}
+			return null;
+		}
+		if (result.reason() != ShieldReason.NONE) {
+			if (onViolation(result.reason())) {
+				throw new IOException(
+						"Directory resource could not be opened through a secure identity-bound handle"
+				);
+			}
+			return null;
+		}
+		if (result.input() == null) {
+			if (onViolation(ShieldReason.UNSAFE_PATH)) {
+				throw new IOException("Directory resource changed before its secure open");
+			}
+			return null;
+		}
+		return result.input();
+	}
+
 	boolean isCurrent() {
-		return ResourcePackShieldEngine.isCurrent(
+		boolean current = !this.closed.get() && ResourcePackShieldEngine.isCurrent(
 				this.configRevision, this.controlGeneration, this.source
 		);
+		if (!current) {
+			this.directoryValidationCache.clear();
+		}
+		return current;
 	}
 
 	boolean onViolation(ShieldReason reason) {
@@ -107,17 +148,13 @@ final class ResourcePackShieldSession {
 	}
 
 	private boolean validateDirectoryPath(String logicalPath, boolean directoryPrefix) {
-		if (!isCurrent() || this.directoryRoots.isEmpty()) {
+		if (!isCurrent()) {
 			return false;
 		}
 		try {
 			ShieldReason reason = directoryPrefix
-					? DirectoryCandidateValidator.validateDirectoryPrefix(
-							this.directoryRoots, logicalPath
-					)
-					: DirectoryCandidateValidator.validate(
-							this.directoryRoots, logicalPath
-					);
+					? this.directoryValidationCache.validateDirectory(logicalPath)
+					: this.directoryValidationCache.validateFile(logicalPath);
 			if (reason != ShieldReason.NONE) {
 				return onViolation(reason);
 			}
@@ -186,5 +223,11 @@ final class ResourcePackShieldSession {
 				this.policy,
 				this::onViolation
 		);
+	}
+
+	void close() {
+		if (this.closed.compareAndSet(false, true)) {
+			this.directoryValidationCache.clear();
+		}
 	}
 }

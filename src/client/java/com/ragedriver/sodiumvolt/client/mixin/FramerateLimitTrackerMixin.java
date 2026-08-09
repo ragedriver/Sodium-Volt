@@ -18,11 +18,17 @@ public abstract class FramerateLimitTrackerMixin {
 			require = 1
 	)
 	private void sodiumVolt$applySmartFpsCap(CallbackInfoReturnable<Integer> callbackInfo) {
-		int smartFpsLimit = SmartFpsEngine.applyFramerateLimit(
-				Minecraft.getInstance(),
-				callbackInfo.getReturnValueI(),
-				System.nanoTime()
-		);
-		callbackInfo.setReturnValue(VoltRecoveryEngine.applyFramerateLimit(smartFpsLimit));
+		int originalLimit = callbackInfo.getReturnValueI();
+		int smartFpsLimit = SmartFpsEngine.requiresFramerateLimitTimestamp()
+				? SmartFpsEngine.applyFramerateLimit(
+						Minecraft.getInstance(),
+						originalLimit,
+						System.nanoTime()
+				)
+				: originalLimit;
+		int effectiveLimit = VoltRecoveryEngine.applyFramerateLimit(smartFpsLimit);
+		if (effectiveLimit != originalLimit) {
+			callbackInfo.setReturnValue(effectiveLimit);
+		}
 	}
 }

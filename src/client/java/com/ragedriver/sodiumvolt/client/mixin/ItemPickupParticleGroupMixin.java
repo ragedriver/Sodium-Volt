@@ -1,7 +1,9 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.guard.VoltGuardEngine;
+import com.ragedriver.sodiumvolt.client.guard.VoltGuardHotPathGate;
 import com.ragedriver.sodiumvolt.client.performance.VisibilityAwareParticleScheduler;
+import com.ragedriver.sodiumvolt.client.performance.VapsHotPathGate;
 import net.minecraft.client.particle.ItemPickupParticle;
 import net.minecraft.client.particle.ItemPickupParticleGroup;
 import org.spongepowered.asm.mixin.Mixin;
@@ -19,9 +21,12 @@ public abstract class ItemPickupParticleGroupMixin {
 	)
 	private Stream<ItemPickupParticle> sodiumVolt$limitExtractedParticles(Queue<ItemPickupParticle> particles) {
 		Stream<ItemPickupParticle> stream = particles.stream();
-		return VoltGuardEngine.isEnabled() || VisibilityAwareParticleScheduler.isEnabled()
-				? stream.filter(particle -> VisibilityAwareParticleScheduler.shouldRenderParticle(particle)
-						&& VoltGuardEngine.shouldExtractParticle(particle))
+		boolean vaps = VapsHotPathGate.renderActive();
+		boolean guard = VoltGuardHotPathGate.particleFilterActive();
+		return vaps || guard
+				? stream.filter(particle -> (!vaps
+						|| VisibilityAwareParticleScheduler.shouldRenderParticle(particle))
+						&& (!guard || VoltGuardEngine.shouldExtractParticle(particle)))
 				: stream;
 	}
 }

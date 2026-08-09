@@ -5,12 +5,18 @@ record ParticleBudgetPlan(int totalBudget, int specialReserveCapacity) {
 
 	static ParticleBudgetPlan create(int totalBudget, int specialParticleCount, boolean preserveCritical) {
 		int safeBudget = Math.max(0, totalBudget);
-		if (!preserveCritical || safeBudget == 0 || specialParticleCount <= 0) {
+		int reserveLimit = maximumSpecialReserveCapacity(safeBudget, preserveCritical);
+		if (reserveLimit == 0 || specialParticleCount <= 0) {
 			return new ParticleBudgetPlan(safeBudget, 0);
 		}
-
-		int reserveLimit = Math.max(1, safeBudget / SPECIAL_RESERVE_DIVISOR);
 		return new ParticleBudgetPlan(safeBudget, Math.min(specialParticleCount, reserveLimit));
+	}
+
+	static int maximumSpecialReserveCapacity(int totalBudget, boolean preserveCritical) {
+		int safeBudget = Math.max(0, totalBudget);
+		return !preserveCritical || safeBudget == 0
+				? 0
+				: Math.max(1, safeBudget / SPECIAL_RESERVE_DIVISOR);
 	}
 
 	int remainingCapacityAfter(int selectedSpecialCount) {

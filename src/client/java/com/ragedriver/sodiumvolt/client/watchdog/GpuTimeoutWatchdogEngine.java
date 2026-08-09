@@ -16,6 +16,7 @@ public final class GpuTimeoutWatchdogEngine {
 	private static final int MAXIMUM_ACTIVE_RELOADS = 32;
 	private static final GpuWatchdogConfig CONFIG = GpuWatchdogConfig.getInstance();
 	private static final WatchdogLifecycleGate LIFECYCLE = new WatchdogLifecycleGate();
+	private static final WatchdogFrameGate FRAME_GATE = new WatchdogFrameGate();
 	private static final AtomicBoolean IN_FRAME = new AtomicBoolean();
 	private static final AtomicBoolean MONITORING_ALLOWED = new AtomicBoolean();
 	private static final AtomicLong FRAME_START_NANOS = new AtomicLong();
@@ -37,7 +38,6 @@ public final class GpuTimeoutWatchdogEngine {
 	private static long startupWorldGraceUntilNanos;
 	private static long lastNotificationNanos;
 	private static int previousLevelIdentity;
-	private static boolean runtimeEnabled;
 
 	private GpuTimeoutWatchdogEngine() {
 	}
@@ -58,7 +58,7 @@ public final class GpuTimeoutWatchdogEngine {
 			disableRuntime();
 			return;
 		}
-		if (!runtimeEnabled) {
+		if (!FRAME_GATE.runtimeEnabled()) {
 			enableRuntime(nowNanos);
 		}
 		if (!LIFECYCLE.isEnabled()) {
@@ -91,14 +91,21 @@ public final class GpuTimeoutWatchdogEngine {
 		// This publication is last so the daemon cannot observe a new frame with stale metadata.
 		if (sequence > 0L) {
 			IN_FRAME.set(true);
+			FRAME_GATE.publishHeartbeat();
 		}
 	}
 
 	public static void onRenderFrameEnd(Minecraft minecraft, long nowNanos) {
 		// Clear first: anything below may call UI or persistence code.
-		IN_FRAME.set(false);
+		if (FRAME_GATE.finishHeartbeat()) {
+			IN_FRAME.set(false);
+		}
 		if (LIFECYCLE.isClientStopping()
 				|| Thread.currentThread() != minecraft.getRunningThread()) {
+			return;
+		}
+		if (!CONFIG.isGpuTimeoutWatchdogEnabled()) {
+			disableRuntime();
 			return;
 		}
 		Signal signal = PENDING_SIGNAL.getAndSet(null);
@@ -106,7 +113,9 @@ public final class GpuTimeoutWatchdogEngine {
 			latestDurationMillis = signal.durationMillis();
 			incidentCount = signal.incidentCount();
 			incidentCapReached = signal.capReached();
-			recoveryRequestStaged |= signal.recoveryRequestStaged();
+			if (signal.recoveryRequestStaged()) {
+				recoveryRequestStaged = true;
+			}
 			status = signal.critical()
 					? WatchdogStatus.CRITICAL
 					: WatchdogStatus.WARNING;
@@ -114,8 +123,18 @@ public final class GpuTimeoutWatchdogEngine {
 		}
 	}
 
+	public static boolean requiresRenderFrameBeginTimestamp() {
+		return !LIFECYCLE.isClientStopping()
+				&& FRAME_GATE.requiresBegin(CONFIG.isGpuTimeoutWatchdogEnabled());
+	}
+
+	public static boolean requiresRenderFrameEndTimestamp() {
+		return !LIFECYCLE.isClientStopping() && FRAME_GATE.requiresEnd();
+	}
+
 	public static ReloadToken beginResourceReload() {
-		if (!runtimeEnabled || !LIFECYCLE.isEnabled()) {
+		if (!CONFIG.isGpuTimeoutWatchdogEnabled()
+				|| !FRAME_GATE.runtimeEnabled() || !LIFECYCLE.isEnabled()) {
 			return ReloadToken.DISABLED;
 		}
 		if (!RELOAD_ACCOUNTING.tryClaim()) {
@@ -129,11 +148,14 @@ public final class GpuTimeoutWatchdogEngine {
 			CompletableFuture<Void> future,
 			ReloadToken token
 	) {
-		if (token == null || !token.counted() || future == null) {
-			completeReload(token, System.nanoTime());
+		if (token == null || !token.counted()) {
 			return;
 		}
-		future.whenComplete((ignored, throwable) -> completeReload(token, System.nanoTime()));
+		if (future == null) {
+			completeReload(token);
+			return;
+		}
+		future.whenComplete((ignored, throwable) -> completeReload(token));
 	}
 
 	public static StatisticsSnapshot snapshotStatistics() {
@@ -168,8 +190,7 @@ public final class GpuTimeoutWatchdogEngine {
 	}
 
 	private static void enableRuntime(long nowNanos) {
-		runtimeEnabled = true;
-		LIFECYCLE.setEnabled(true);
+		FRAME_GATE.enableRuntime();
 		CONTROL_GENERATION.updateAndGet(
 				value -> value == Long.MAX_VALUE ? 1L : value + 1L
 		);
@@ -180,6 +201,8 @@ public final class GpuTimeoutWatchdogEngine {
 				settings.startupWorldGraceNanos()
 		);
 		previousLevelIdentity = 0;
+		// Publish enabled last so a parked daemon cannot observe stale generation data.
+		LIFECYCLE.setEnabled(true);
 		if (LIFECYCLE.claimThreadStart()) {
 			Thread thread = new Thread(
 					GpuTimeoutWatchdogEngine::monitorLoop,
@@ -193,10 +216,10 @@ public final class GpuTimeoutWatchdogEngine {
 	}
 
 	private static void disableRuntime() {
-		if (!runtimeEnabled) {
+		if (!FRAME_GATE.runtimeEnabled()) {
 			return;
 		}
-		runtimeEnabled = false;
+		FRAME_GATE.disableRuntime();
 		LIFECYCLE.setEnabled(false);
 		CONTROL_GENERATION.updateAndGet(
 				value -> value == Long.MAX_VALUE ? 1L : value + 1L
@@ -211,7 +234,7 @@ public final class GpuTimeoutWatchdogEngine {
 
 	private static void onClientStopping() {
 		LIFECYCLE.beginStopping();
-		runtimeEnabled = false;
+		FRAME_GATE.disableRuntime();
 		CONTROL_GENERATION.updateAndGet(
 				value -> value == Long.MAX_VALUE ? 1L : value + 1L
 		);
@@ -233,11 +256,19 @@ public final class GpuTimeoutWatchdogEngine {
 
 	private static void monitorLoop() {
 		GpuWatchdogPolicy policy = new GpuWatchdogPolicy();
+		long lifecycleGeneration = LIFECYCLE.transitionGeneration();
 		while (!LIFECYCLE.isClientStopping()) {
+			long currentGeneration = LIFECYCLE.transitionGeneration();
+			if (currentGeneration != lifecycleGeneration) {
+				policy.resetMonitoring();
+				lifecycleGeneration = currentGeneration;
+			}
 			EngineSettings current = settings;
 			if (!LIFECYCLE.isEnabled()) {
 				policy.resetMonitoring();
-				park(250);
+				lifecycleGeneration = LIFECYCLE.awaitTransition(
+						lifecycleGeneration, 0L
+				);
 				continue;
 			}
 			int event = policy.evaluate(
@@ -268,7 +299,9 @@ public final class GpuTimeoutWatchdogEngine {
 								policy.latestDurationMillis(),
 								policy.incidents()
 						);
-				recoveryRequestStaged |= requestStaged;
+				if (requestStaged) {
+					recoveryRequestStaged = true;
+				}
 				if (current.policy().writeReport()) {
 					GpuWatchdogReportStore.write(new GpuWatchdogIncidentReport(
 							policy.latestDurationMillis(),
@@ -287,17 +320,10 @@ public final class GpuTimeoutWatchdogEngine {
 						requestStaged
 				));
 			}
-			park(current.policy().sampleIntervalMillis());
-		}
-	}
-
-	private static void park(int milliseconds) {
-		try {
-			Thread.sleep(Math.max(100, milliseconds));
-		} catch (InterruptedException exception) {
-			if (!LIFECYCLE.isClientStopping()) {
-				Thread.interrupted();
-			}
+			lifecycleGeneration = LIFECYCLE.awaitTransition(
+					lifecycleGeneration,
+					current.policy().sampleIntervalMillis()
+			);
 		}
 	}
 
@@ -318,7 +344,7 @@ public final class GpuTimeoutWatchdogEngine {
 		return false;
 	}
 
-	private static void completeReload(ReloadToken token, long nowNanos) {
+	private static void completeReload(ReloadToken token) {
 		if (token == null || !token.counted()
 				|| !RELOAD_ACCOUNTING.release(
 						token.controlGeneration(),
@@ -327,6 +353,7 @@ public final class GpuTimeoutWatchdogEngine {
 				)) {
 			return;
 		}
+		long nowNanos = System.nanoTime();
 		long graceUntil = saturatedAdd(nowNanos, settings.resourceReloadGraceNanos());
 		RELOAD_GRACE_UNTIL_NANOS.accumulateAndGet(graceUntil, Math::max);
 	}

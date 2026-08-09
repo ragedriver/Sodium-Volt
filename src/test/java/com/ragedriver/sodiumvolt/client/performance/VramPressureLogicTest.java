@@ -7,6 +7,8 @@ public final class VramPressureLogicTest {
 	public static void main(String[] arguments) {
 		testTextureAndHeadroomByteMath();
 		testLedgerReleaseAndSaturation();
+		testAccountingActivationGate();
+		testRuntimeFailureClearsAcrossClientStop();
 		testAutomaticBudgetHeuristic();
 		testSustainedPressureHysteresisAndRecovery();
 		testRenderDistanceOwnership();
@@ -58,6 +60,12 @@ public final class VramPressureLogicTest {
 		check(ledger.hasSpikeSignal() && ledger.consumeSpikeSignal()
 						&& !ledger.hasSpikeSignal(),
 				"spike signal must be observable and consumable");
+		ledger.add(100L, true, false);
+		check(ledger.hasSpikeSignal(), "a later tracked spike must republish its signal");
+		ledger.clearSpikeSignal();
+		check(!ledger.hasSpikeSignal(),
+				"runtime disable must make pending spike publication dormant immediately");
+		ledger.release(100L, true, false);
 
 		texture.release();
 		texture.release();
@@ -78,6 +86,54 @@ public final class VramPressureLogicTest {
 				"ledger totals must saturate");
 		assertEquals(Long.MAX_VALUE, saturated.snapshot().peakBytes(),
 				"ledger peak must saturate");
+	}
+
+	private static void testAccountingActivationGate() {
+		VramAccountingGate dormant = new VramAccountingGate();
+		for (int allocation = 0; allocation < 10_000; allocation++) {
+			check(!dormant.isTracking(),
+					"never-enabled allocation hooks must not enter accounting");
+		}
+		check(!dormant.isTracking() && !dormant.hasCompleteBaseline(),
+				"dormant accounting performs no ledger lifecycle work");
+		dormant.publishEnabled(true);
+		check(!dormant.isTracking(),
+				"first runtime enable leaves incomplete allocation hooks dormant");
+		check(!dormant.requiresTransition(true),
+				"acknowledged late enable does not request periodic diagnostic frames");
+		check(!dormant.hasCompleteBaseline(),
+				"late activation never claims a complete pre-existing allocation estimate");
+		dormant.publishEnabled(false);
+		check(!dormant.isTracking(),
+				"runtime disable restores a genuinely dormant allocation-hook path");
+		dormant.publishEnabled(true);
+		check(!dormant.isTracking() && !dormant.hasCompleteBaseline(),
+				"re-enable remains dormant without fabricating completeness");
+
+		VramAccountingGate startup = new VramAccountingGate();
+		startup.initialize(true);
+		check(startup.isTracking() && startup.hasCompleteBaseline(),
+				"startup-enabled accounting owns a complete session baseline");
+		check(startup.requiresTransition(false),
+				"disable-before-first-update must still demand one gate transition frame");
+		startup.publishEnabled(false);
+		check(!startup.requiresTransition(false),
+				"publishing startup disable must restore the dormant no-frame state");
+		startup.publishEnabled(true);
+		check(!startup.isTracking() && !startup.hasCompleteBaseline(),
+				"the first untracked interval permanently invalidates and dormants accounting");
+	}
+
+	private static void testRuntimeFailureClearsAcrossClientStop() {
+		VramRuntimeFailureGate failure = new VramRuntimeFailureGate();
+		failure.fail();
+		check(failure.requiresRenderFrame(false, false),
+				"runtime failure schedules one fail-open cleanup frame");
+		failure.clear();
+		check(!failure.requiresRenderFrame(false, false),
+				"inactive client stop clears stale failure timestamp demand");
+		check(failure.requiresRenderFrame(true, false),
+				"a later client session may enable and retry VRAM protection");
 	}
 
 	private static void testAutomaticBudgetHeuristic() {

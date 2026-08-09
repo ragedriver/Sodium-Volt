@@ -1,5 +1,7 @@
 package com.ragedriver.sodiumvolt.client.recovery;
 
+import com.ragedriver.sodiumvolt.client.performance.InspectorStatisticsDemand;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -24,6 +26,8 @@ public final class RecoveryLogicTest {
 		testRetainedProfileApcSuspension();
 		testBelowThresholdStableMonitoringBreaksTheStreak();
 		testTransitionFailureRetryGate();
+		testDisabledFastGateAndCleanup();
+		testStatisticsPublicationGate();
 		testNormalization();
 		testStateRoundTripAndMalformedInputs();
 		testSanitizedReport();
@@ -45,6 +49,39 @@ public final class RecoveryLogicTest {
 		check(!plan.activateRecovery(), "clean first launch must only monitor");
 		check(plan.stagedState().clean().equals(RecoveryPersistentState.EMPTY),
 				"clean stop must clear marker, counters, and backup");
+	}
+
+	private static void testStatisticsPublicationGate() {
+		VoltRecoveryEngine.StatisticsSnapshot snapshot =
+				new VoltRecoveryEngine.StatisticsSnapshot(
+						VoltRecoveryEngine.RecoveryStatus.MONITORING,
+						1, 2, 3, true, 4L, 60, true
+				);
+		check(RecoveryStatisticsGate.matches(
+					snapshot,
+					VoltRecoveryEngine.RecoveryStatus.MONITORING,
+					1, 2, 3, true, 4L, 60, true
+			), "unchanged recovery statistics reuse the published snapshot");
+		check(!RecoveryStatisticsGate.matches(
+					snapshot,
+					VoltRecoveryEngine.RecoveryStatus.MONITORING,
+					1, 2, 3, true, 3L, 60, true
+			), "changed recovery statistics publish at their safe boundary");
+		check(RecoveryStatisticsGate.shouldClear(false, snapshot)
+					&& !RecoveryStatisticsGate.shouldClear(
+							false,
+							VoltRecoveryEngine.StatisticsSnapshot.EMPTY
+					),
+				"statistics-off clears once without per-frame snapshot churn");
+		InspectorStatisticsDemand.publish(false);
+		check(RecoveryStatisticsGate.shouldClear(
+				true && InspectorStatisticsDemand.isRequested(), snapshot
+		), "hidden demand must request stale Recovery publication cleanup");
+		InspectorStatisticsDemand.publish(true);
+		check(!RecoveryStatisticsGate.shouldClear(
+				InspectorStatisticsDemand.isRequested(), snapshot
+		), "visible demand must allow prompt Recovery publication");
+		InspectorStatisticsDemand.publish(false);
 	}
 
 	private static void testUncleanThreshold() {
@@ -386,6 +423,26 @@ public final class RecoveryLogicTest {
 							&& !stoppingGate.mayAttemptTransition(),
 					"late render frames must never rearm monitoring after CLIENT_STOPPING");
 		}
+	}
+
+	private static void testDisabledFastGateAndCleanup() {
+		RecoveryFastGate gate = new RecoveryFastGate();
+		for (int frame = 0; frame < 10_000; frame++) {
+			check(!gate.requiresRenderFrame(false, false),
+					"never-enabled Recovery must stay on the primitive disabled path");
+		}
+		gate.publish(true, true);
+		check(gate.requiresRenderFrame(false, false),
+				"runtime disable must retain one owned cleanup frame");
+		check(gate.maySuspendApc(false),
+				"a retained applied Recovery profile remains visible to APC");
+		gate.clear();
+		check(!gate.requiresRenderFrame(false, false) && !gate.maySuspendApc(false),
+				"completed cleanup becomes fully dormant exactly once");
+		check(gate.requiresRenderFrame(true, false),
+				"re-enable becomes visible without a lock or stale generation");
+		check(!gate.requiresRenderFrame(true, true),
+				"the permanent stopping latch overrides late master writes");
 	}
 
 	private static void testNormalization() {

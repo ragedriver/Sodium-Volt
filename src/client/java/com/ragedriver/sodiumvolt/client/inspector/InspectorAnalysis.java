@@ -32,28 +32,35 @@ public final class InspectorAnalysis {
 			long gcTimeDeltaMs,
 			double gpuUtilization,
 			int chunkQueueSize,
-			long reloadDurationMs
+			long reloadDurationMs,
+			boolean frameAvailable,
+			boolean chunkAvailable,
+			boolean particleAvailable,
+			boolean sceneAvailable,
+			boolean gcAvailable,
+			boolean gpuAvailable
 	) {
 		ArrayList<String> result = new ArrayList<>(3);
-		if (gpuUtilization >= 90.0D && p95Ms >= spikeThresholdMs) {
+		if (gpuAvailable && frameAvailable
+				&& gpuUtilization >= 90.0D && p95Ms >= spikeThresholdMs) {
 			add(result, "GPU load is high during slow frames; consider lowering resolution or shader quality.");
 		}
-		if (chunkQueueSize >= 8) {
+		if (chunkAvailable && chunkQueueSize >= 8) {
 			add(result, "Chunk builds are queued; consider lowering render distance or moving more slowly.");
 		}
-		if (particleCount >= 4_096) {
+		if (particleAvailable && particleCount >= 4_096) {
 			add(result, "Particle volume is high; Volt Guard's particle budget may smooth spikes.");
 		}
-		if (blockEntityCount + displayEntityCount >= 384) {
+		if (sceneAvailable && blockEntityCount + displayEntityCount >= 384) {
 			add(result, "The scene is entity-dense; Volt Guard's entity budgets may reduce render pressure.");
 		}
-		if (gcTimeDeltaMs >= 25L) {
+		if (gcAvailable && gcTimeDeltaMs >= 25L) {
 			add(result, "JVM collection time increased; review memory-heavy resource packs or mods.");
 		}
 		if (reloadDurationMs >= 10_000L) {
 			add(result, "The last resource reload was long; review large or overlapping resource packs.");
 		}
-		if (p95Ms >= spikeThresholdMs) {
+		if (frameAvailable && p95Ms >= spikeThresholdMs) {
 			add(result, "Frame-time spikes persist; reduce view distance or expensive visual effects.");
 		}
 		return List.copyOf(result);

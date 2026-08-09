@@ -17,4 +17,31 @@ public final class ShieldReloadGate {
 				new ResourcePackShieldRejectedException()
 		));
 	}
+
+	public static PrivateTokenSource privateTokenSource(
+			int privateReloadDepth,
+			int publicReloadOverflowDepth,
+			boolean publicTokenAvailable
+	) {
+		if (publicReloadOverflowDepth > 0) {
+			return PrivateTokenSource.DISABLED;
+		}
+		if (privateReloadDepth > 1) {
+			return PrivateTokenSource.PRIVATE;
+		}
+		return publicTokenAvailable
+				? PrivateTokenSource.PUBLIC
+				: PrivateTokenSource.OWNED;
+	}
+
+	public enum PrivateTokenSource {
+		DISABLED,
+		PUBLIC,
+		PRIVATE,
+		OWNED;
+
+		public boolean ownsToken() {
+			return this == OWNED;
+		}
+	}
 }

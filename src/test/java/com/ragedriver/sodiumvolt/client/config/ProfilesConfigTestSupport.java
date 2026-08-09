@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Locale;
 
 public final class ProfilesConfigTestSupport {
@@ -20,11 +21,16 @@ public final class ProfilesConfigTestSupport {
 		Path link = directory.resolve("profiles-link.json");
 		try {
 			ProfilesConfig defaults = ProfilesConfig.load(path);
+			ProfilesConfig.RuntimeControl defaultControl = defaults.runtimeControl();
+			check(!defaultControl.enabled()
+						&& defaultControl == defaults.runtimeControl(),
+					"disabled ticks read one stable lock-free runtime snapshot");
 			check(!defaults.isProfilesEnabled() && !defaults.isGlobalDefaultsInitialized(),
 					"master and captured baseline default off");
 			check(defaults.isSinglePlayerProfilesEnabled()
 						&& defaults.isSpecificServerProfilesEnabled(),
 					"context recognition defaults ready behind the master");
+			long initialIdentityRevision = defaults.identityContextRevision();
 
 			String rawAddress = "Private.Example:25565";
 			String serverKey = ProfileIdentity.serverKey(
@@ -34,6 +40,22 @@ public final class ProfilesConfigTestSupport {
 					"/private/saves/My World", defaults.identitySalt()
 			).orElseThrow();
 			defaults.setProfilesEnabled(true);
+			ProfilesConfig.RuntimeControl enabledControl = defaults.runtimeControl();
+			check(enabledControl.enabled() && enabledControl != defaultControl,
+					"a config mutation atomically publishes a new runtime snapshot");
+			check(defaults.identityContextRevision() != initialIdentityRevision,
+					"enabling profiles advances the identity-context generation");
+			long enabledIdentityRevision = defaults.identityContextRevision();
+			defaults.setProfilesEnabled(true);
+			check(defaults.identityContextRevision() == enabledIdentityRevision,
+					"idempotent scope writes do not invalidate a stable identity");
+			long beforeScopeRevision = defaults.identityContextRevision();
+			defaults.setSinglePlayerProfilesEnabled(false);
+			check(!defaults.runtimeControl().singlePlayerProfilesEnabled(),
+					"scope mutations publish before the next profile tick");
+			check(defaults.identityContextRevision() != beforeScopeRevision,
+					"single-player scope changes invalidate identity context");
+			defaults.setSinglePlayerProfilesEnabled(true);
 			defaults.initializeGlobalDefaults(new ProfileSettings(
 					20, 10, 150, 90, ProfileParticleMode.DECREASED
 			));
@@ -47,6 +69,10 @@ public final class ProfilesConfigTestSupport {
 			ProfilesConfig loaded = ProfilesConfig.load(path);
 			check(loaded.isProfilesEnabled() && loaded.isGlobalDefaultsInitialized(),
 					"strict round trip preserves behavior");
+			check(loaded.runtimeControl().enabled()
+						&& loaded.runtimeControl().identityContextRevision()
+						== loaded.identityContextRevision(),
+					"loaded runtime state is published as one coherent snapshot");
 			check(loaded.serverProfileCount() == 1
 						&& loaded.singlePlayerProfileCount() == 1,
 					"strict round trip preserves hashed records");
@@ -65,7 +91,11 @@ public final class ProfilesConfigTestSupport {
 			Files.write(path, new byte[ProfilesConfig.MAXIMUM_CONFIG_BYTES + 1]);
 			check(!ProfilesConfig.load(path).isProfilesEnabled(), "oversized document");
 
+			long beforeFactoryIdentityRevision = loaded.identityContextRevision();
+			byte[] beforeFactorySalt = loaded.identitySalt();
 			loaded.resetToFactoryDefaults();
+			check(!loaded.runtimeControl().enabled(),
+					"factory reset publishes the disabled fast path immediately");
 			check(!loaded.isProfilesEnabled()
 						&& !loaded.isGlobalDefaultsInitialized()
 						&& loaded.serverProfileCount() == 0
@@ -74,6 +104,10 @@ public final class ProfilesConfigTestSupport {
 			check(loaded.getGlobalDefaults().equals(ProfileSettings.globalDefaults())
 						&& loaded.getServerTemplate().equals(ProfileSettings.serverDefaults()),
 					"factory reset copies subordinate profile defaults");
+			check(loaded.identityContextRevision() != beforeFactoryIdentityRevision,
+					"factory reset invalidates every cached profile identity");
+			check(!Arrays.equals(beforeFactorySalt, loaded.identitySalt()),
+					"factory reset replaces the profile identity salt");
 
 			Files.deleteIfExists(path);
 			if (createDanglingSymlink(link)) {

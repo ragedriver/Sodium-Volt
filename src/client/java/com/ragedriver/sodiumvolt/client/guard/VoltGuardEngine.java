@@ -1,5 +1,6 @@
 package com.ragedriver.sodiumvolt.client.guard;
 
+import com.ragedriver.sodiumvolt.SodiumVolt;
 import com.ragedriver.sodiumvolt.client.config.VoltGuardConfig;
 import com.ragedriver.sodiumvolt.client.mixin.ParticleGroupAccessor;
 import com.ragedriver.sodiumvolt.client.mixin.ParticlePositionAccessor;
@@ -27,6 +28,7 @@ import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
@@ -46,8 +48,10 @@ public final class VoltGuardEngine {
 
 	private static final VoltGuardConfig CONFIG = VoltGuardConfig.getInstance();
 	private static final AdaptiveBudgetController ADAPTIVE_BUDGET = new AdaptiveBudgetController();
-	private static final ThreadLocal<FrameState> FRAME_STATE = ThreadLocal.withInitial(FrameState::new);
+	private static final GuardThreadState<FrameState> FRAME_STATE =
+			new GuardThreadState<>(FrameState::new);
 	private static final AtomicLong LAST_NOTIFICATION_NANOS = new AtomicLong();
+	private static boolean particlePlanningFailureLogged;
 
 	private VoltGuardEngine() {
 	}
@@ -61,13 +65,20 @@ public final class VoltGuardEngine {
 			Frustum frustum,
 			Camera camera
 	) {
-		FrameState frame = FRAME_STATE.get();
 		if (!CONFIG.isVoltGuardEnabled()) {
-			frame.disable();
-			ADAPTIVE_BUDGET.disable();
+			FrameState frame = FRAME_STATE.release();
+			if (frame != null) {
+				frame.disable();
+			}
+			if (frame != null || VoltGuardHotPathGate.runtimeActive()) {
+				ADAPTIVE_BUDGET.disable();
+				VoltGuardHotPathGate.clear();
+			}
 			return;
 		}
 
+		FrameState frame = FRAME_STATE.acquire();
+		VoltGuardHotPathGate.publishRuntime(true);
 		double scale = ADAPTIVE_BUDGET.update(
 				System.nanoTime(),
 				CONFIG.getTargetFps(),
@@ -80,30 +91,58 @@ public final class VoltGuardEngine {
 				CONFIG.isPrioritizeVisibleEffects(),
 				CONFIG.isPreserveGameplayCriticalEffects()
 		);
-		ParticleEligibilityHandoff<Particle> eligibilityHandoff =
-				VisibilityAwareParticleScheduler.particleEligibilityHandoff();
-		if (eligibilityHandoff != null) {
-			selectParticles(frame, eligibilityHandoff, camera.position());
-		} else {
-			selectParticles(frame, particleGroups, frustum, camera.position());
+		try {
+			ParticleEligibilityHandoff<Particle> eligibilityHandoff =
+					VisibilityAwareParticleScheduler.particleEligibilityHandoff();
+			if (eligibilityHandoff != null) {
+				selectParticles(frame, eligibilityHandoff, camera.position());
+			} else {
+				selectParticles(frame, particleGroups, frustum, camera.position());
+			}
+		} catch (RuntimeException | LinkageError exception) {
+			frame.failOpenParticleSelection();
+			if (!particlePlanningFailureLogged) {
+				particlePlanningFailureLogged = true;
+				SodiumVolt.LOGGER.warn(
+						"Volt Guard particle planning failed open; vanilla extraction will continue",
+						exception
+				);
+			}
 		}
+		VoltGuardHotPathGate.publishParticleFilter(!frame.allParticlesSelected);
 	}
 
 	public static void endParticleExtraction() {
-		FRAME_STATE.get().endParticleExtraction();
+		if (VoltGuardHotPathGate.runtimeActive()) {
+			FrameState frame = FRAME_STATE.peek();
+			if (frame != null) {
+				frame.endParticleExtraction();
+			}
+		}
+		VoltGuardHotPathGate.publishParticleFilter(false);
 	}
 
 	public static boolean isEnabled() {
 		return CONFIG.isVoltGuardEnabled();
 	}
 
+	public static void onLevelChanged() {
+		FrameState frame = FRAME_STATE.release();
+		if (frame != null) {
+			frame.disable();
+		}
+		ADAPTIVE_BUDGET.disable();
+		VoltGuardHotPathGate.clear();
+	}
+
 	public static boolean shouldExtractParticle(Particle particle) {
-		if (!CONFIG.isVoltGuardEnabled()) {
+		if (!VoltGuardHotPathGate.particleFilterActive()) {
 			return true;
 		}
 
-		FrameState frame = FRAME_STATE.get();
-		return !frame.particleExtractionActive
+		FrameState frame = FRAME_STATE.peek();
+		return frame == null
+				|| !frame.particleExtractionActive
 				|| frame.allParticlesSelected
 				|| frame.selectedParticles.contains(particle);
 	}
@@ -115,58 +154,45 @@ public final class VoltGuardEngine {
 	) {
 		int eligibleCount = eligibilityHandoff.candidateCount();
 		if (eligibleCount <= frame.particleBudget) {
+			frame.particleSelection.abort();
+			frame.selectedParticles.clear();
 			frame.allParticlesSelected = true;
 			frame.suppressedParticles = 0;
 			return;
 		}
 
-		ParticleBudgetPlan plan = ParticleBudgetPlan.create(
-				frame.particleBudget,
-				eligibilityHandoff.specialCount(),
-				frame.preserveCritical
-		);
 		Set<Particle> selected = frame.selectedParticles;
-		if (plan.specialReserveCapacity() > 0) {
-			BoundedTopK<Particle> specialReserve = frame.specialParticleSelection;
-			specialReserve.reset(plan.specialReserveCapacity(), frame.prioritizeNearby);
-			for (int index = 0; index < eligibilityHandoff.candidateCount(); index++) {
-				if (!eligibilityHandoff.isSpecial(index)) {
-					continue;
-				}
-				Particle particle = eligibilityHandoff.candidateAt(index);
-				specialReserve.offer(
-						particle,
-						false,
-						true,
-						particleDistanceSquared(particle, cameraPosition),
-						eligibilityHandoff.originalIndexAt(index)
-				);
-			}
-			specialReserve.addTo(selected);
-			specialReserve.clear();
-		}
-
-		BoundedTopK<Particle> generalSelection = frame.generalParticleSelection;
-		generalSelection.reset(
-				plan.remainingCapacityAfter(selected.size()),
-				frame.prioritizeNearby
-		);
+		SpillAwareParticleSelector<Particle> selection = frame.particleSelection;
+		selection.begin(frame.particleBudget, frame.prioritizeNearby, frame.preserveCritical);
 		for (int index = 0; index < eligibilityHandoff.candidateCount(); index++) {
 			Particle particle = eligibilityHandoff.candidateAt(index);
-			if (selected.contains(particle)) {
-				continue;
-			}
 			double distanceSquared = particleDistanceSquared(particle, cameraPosition);
-			generalSelection.offer(
+			selection.offer(
 					particle,
-					false,
+					eligibilityHandoff.isSpecial(index),
 					frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
 					distanceSquared,
 					eligibilityHandoff.originalIndexAt(index)
 			);
 		}
-		generalSelection.addTo(selected);
-		generalSelection.clear();
+		if (!selection.finishFromSpill(selected, eligibilityHandoff.specialCount())) {
+			// Duplicate identities can occupy more spill slots than the identity
+			// reserve consumes. Replay only that adversarial case to keep the old
+			// exact identity semantics; normal handoffs remain one candidate pass.
+			for (int index = 0; index < eligibilityHandoff.candidateCount(); index++) {
+				Particle particle = eligibilityHandoff.candidateAt(index);
+				double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+				selection.offerReplay(
+						particle,
+						frame.preserveCritical
+								&& distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
+						distanceSquared,
+						eligibilityHandoff.originalIndexAt(index),
+						selected
+				);
+			}
+			selection.completeReplay(selected);
+		}
 
 		frame.allParticlesSelected = false;
 		frame.suppressedParticles = Math.max(0, eligibleCount - selected.size());
@@ -184,6 +210,18 @@ public final class VoltGuardEngine {
 				particleGroups,
 				ParticleRenderType.ELDER_GUARDIANS
 		);
+		if (GuardWorkloadBounds.particleQueuesFitBudget(
+				quadParticles.size(),
+				itemPickupParticles.size(),
+				elderGuardianParticles.size(),
+				frame.particleBudget
+		)) {
+			frame.particleSelection.abort();
+			frame.selectedParticles.clear();
+			frame.allParticlesSelected = true;
+			frame.suppressedParticles = 0;
+			return;
+		}
 
 		int visibleQuadCount = 0;
 		for (Particle particle : quadParticles) {
@@ -205,108 +243,144 @@ public final class VoltGuardEngine {
 			}
 		}
 		int eligibleCount = saturatingAdd(visibleQuadCount, specialCount);
-		if (eligibleCount <= frame.particleBudget) {
+		if (GuardWorkloadBounds.eligibleParticlesFitBudget(eligibleCount, frame.particleBudget)) {
+			frame.particleSelection.abort();
+			frame.selectedParticles.clear();
 			frame.allParticlesSelected = true;
 			frame.suppressedParticles = 0;
 			return;
 		}
 
-		ParticleBudgetPlan plan = ParticleBudgetPlan.create(
-				frame.particleBudget,
-				specialCount,
-				frame.preserveCritical
-		);
 		Set<Particle> selected = frame.selectedParticles;
-		if (plan.specialReserveCapacity() > 0) {
-			BoundedTopK<Particle> specialReserve = frame.specialParticleSelection;
-			specialReserve.reset(
-					plan.specialReserveCapacity(),
-					frame.prioritizeNearby
-			);
-			int originalIndex = quadParticles.size();
-			for (Particle particle : itemPickupParticles) {
-				if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-					specialReserve.offer(
-							particle,
-							false,
-							true,
-							particleDistanceSquared(particle, cameraPosition),
-							originalIndex
-					);
-				}
-				originalIndex++;
-			}
-			for (Particle particle : elderGuardianParticles) {
-				if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-					specialReserve.offer(
-							particle,
-							false,
-							true,
-							particleDistanceSquared(particle, cameraPosition),
-							originalIndex
-					);
-				}
-				originalIndex++;
-			}
-			specialReserve.addTo(selected);
-			specialReserve.clear();
-		}
-
-		int remainingCapacity = plan.remainingCapacityAfter(selected.size());
-		BoundedTopK<Particle> generalSelection = frame.generalParticleSelection;
-		generalSelection.reset(
-				remainingCapacity,
-				frame.prioritizeNearby
-		);
+		SpillAwareParticleSelector<Particle> selection = frame.particleSelection;
+		selection.begin(frame.particleBudget, frame.prioritizeNearby, frame.preserveCritical);
 		int originalIndex = 0;
 		for (Particle particle : quadParticles) {
 			if (particle instanceof SingleQuadParticle
 					&& isVisible(particle, frustum)
 					&& VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				double distanceSquared = particleDistanceSquared(particle, cameraPosition);
-				generalSelection.offer(
+				offerFusedParticle(
+						frame,
+						selection,
 						particle,
 						false,
-						frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
-						distanceSquared,
+						cameraPosition,
 						originalIndex
 				);
 			}
 			originalIndex++;
 		}
 		for (Particle particle : itemPickupParticles) {
-			if (!selected.contains(particle)
-					&& VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				double distanceSquared = particleDistanceSquared(particle, cameraPosition);
-				generalSelection.offer(
+			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
+				offerFusedParticle(
+						frame,
+						selection,
 						particle,
-						false,
-						frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
-						distanceSquared,
+						true,
+						cameraPosition,
 						originalIndex
 				);
 			}
 			originalIndex++;
 		}
 		for (Particle particle : elderGuardianParticles) {
-			if (!selected.contains(particle)
-					&& VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				double distanceSquared = particleDistanceSquared(particle, cameraPosition);
-				generalSelection.offer(
+			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
+				offerFusedParticle(
+						frame,
+						selection,
 						particle,
-						false,
-						frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
-						distanceSquared,
+						true,
+						cameraPosition,
 						originalIndex
 				);
 			}
 			originalIndex++;
 		}
-		generalSelection.addTo(selected);
-		generalSelection.clear();
+		if (!selection.finishFromSpill(selected, specialCount)) {
+			replayGeneralParticleSelection(
+					frame,
+					selection,
+					selected,
+					quadParticles,
+					itemPickupParticles,
+					elderGuardianParticles,
+					frustum,
+					cameraPosition
+			);
+		}
 
 		frame.allParticlesSelected = false;
 		frame.suppressedParticles = Math.max(0, eligibleCount - selected.size());
+	}
+
+	private static void offerFusedParticle(
+			FrameState frame,
+			SpillAwareParticleSelector<Particle> selection,
+			Particle particle,
+			boolean special,
+			Vec3 cameraPosition,
+			int originalIndex
+	) {
+		double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+		selection.offer(
+				particle,
+				special,
+				frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
+				distanceSquared,
+				originalIndex
+		);
+	}
+
+	private static void replayGeneralParticleSelection(
+			FrameState frame,
+			SpillAwareParticleSelector<Particle> selection,
+			Set<Particle> selected,
+			Queue<Particle> quadParticles,
+			Queue<Particle> itemPickupParticles,
+			Queue<Particle> elderGuardianParticles,
+			Frustum frustum,
+			Vec3 cameraPosition
+	) {
+		int originalIndex = 0;
+		for (Particle particle : quadParticles) {
+			if (particle instanceof SingleQuadParticle
+					&& isVisible(particle, frustum)
+					&& VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
+				offerReplayParticle(frame, selection, selected, particle, cameraPosition, originalIndex);
+			}
+			originalIndex++;
+		}
+		for (Particle particle : itemPickupParticles) {
+			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
+				offerReplayParticle(frame, selection, selected, particle, cameraPosition, originalIndex);
+			}
+			originalIndex++;
+		}
+		for (Particle particle : elderGuardianParticles) {
+			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
+				offerReplayParticle(frame, selection, selected, particle, cameraPosition, originalIndex);
+			}
+			originalIndex++;
+		}
+		selection.completeReplay(selected);
+	}
+
+	private static void offerReplayParticle(
+			FrameState frame,
+			SpillAwareParticleSelector<Particle> selection,
+			Set<Particle> selected,
+			Particle particle,
+			Vec3 cameraPosition,
+			int originalIndex
+	) {
+		double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+		selection.offerReplay(
+				particle,
+				frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
+				distanceSquared,
+				originalIndex,
+				selected
+		);
 	}
 
 	private static Queue<Particle> particlesFor(
@@ -342,36 +416,58 @@ public final class VoltGuardEngine {
 			Vec3 cameraPosition,
 			@Nullable HitResult hitResult
 	) {
-		FrameState frame = FRAME_STATE.get();
-		if (!CONFIG.isVoltGuardEnabled()) {
+		if (!VoltGuardHotPathGate.runtimeActive()
+				&& !CONFIG.isVoltGuardEnabled()) {
+			return false;
+		}
+		FrameState frame = FRAME_STATE.acquire();
+		VoltGuardHotPathGate.publishRuntime(true);
+		ensureConfigured(frame);
+		if (GuardWorkloadBounds.statesFitBudget(states.size(), frame.blockEntityBudget)) {
 			frame.abortBlockEntityHandoff();
 			return false;
 		}
-		ensureConfigured(frame);
 		frame.beginBlockEntityHandoff(states, cameraPosition, hitResult);
 		return true;
 	}
 
 	public static void offerBlockEntitySurvivor(BlockEntityRenderState state, int originalIndex) {
-		FRAME_STATE.get().offerBlockEntitySurvivor(state, originalIndex);
+		FrameState frame = FRAME_STATE.peek();
+		if (frame != null) {
+			frame.offerBlockEntitySurvivor(state, originalIndex);
+		}
 	}
 
 	public static void completeBlockEntityHandoff(List<BlockEntityRenderState> states) {
-		FRAME_STATE.get().completeBlockEntityHandoff(states);
+		FrameState frame = FRAME_STATE.peek();
+		if (frame != null) {
+			frame.completeBlockEntityHandoff(states);
+		}
 	}
 
 	public static void abortBlockEntityHandoff() {
-		FRAME_STATE.get().abortBlockEntityHandoff();
+		if (VoltGuardHotPathGate.runtimeActive()) {
+			FrameState frame = FRAME_STATE.peek();
+			if (frame != null) {
+				frame.abortBlockEntityHandoff();
+			}
+		}
 	}
 
 	private static void finishLevelExtraction(LevelExtractionContext context) {
 		if (!CONFIG.isVoltGuardEnabled()) {
-			FRAME_STATE.get().disable();
-			ADAPTIVE_BUDGET.disable();
+			FrameState frame = FRAME_STATE.release();
+			if (frame != null) {
+				frame.disable();
+			}
+			if (frame != null || VoltGuardHotPathGate.runtimeActive()) {
+				ADAPTIVE_BUDGET.disable();
+				VoltGuardHotPathGate.clear();
+			}
 			return;
 		}
 
-		FrameState frame = FRAME_STATE.get();
+		FrameState frame = FRAME_STATE.acquire();
 		if (!frame.configured) {
 			ensureConfigured(frame);
 			frame.particleExtractionActive = false;
@@ -409,6 +505,7 @@ public final class VoltGuardEngine {
 				removedDisplayEntities
 		);
 		frame.finishFrame();
+		VoltGuardHotPathGate.clear();
 	}
 
 	private static void ensureConfigured(FrameState frame) {
@@ -475,56 +572,102 @@ public final class VoltGuardEngine {
 			boolean preserveCritical,
 			@Nullable HitResult hitResult
 	) {
-		int displayCount = 0;
-		for (EntityRenderState state : states) {
-			if (state instanceof DisplayEntityRenderState) {
-				displayCount++;
-			}
-		}
-		if (displayCount <= budget) {
+		if (GuardWorkloadBounds.statesFitBudget(states.size(), budget)) {
 			return 0;
 		}
 		if (!prioritizeNearby && !preserveCritical) {
 			int accepted = 0;
+			int removed = 0;
 			Iterator<EntityRenderState> iterator = states.iterator();
 			while (iterator.hasNext()) {
 				if (iterator.next() instanceof DisplayEntityRenderState && accepted++ >= budget) {
 					iterator.remove();
+					removed++;
 				}
 			}
-			return displayCount - budget;
+			return removed;
 		}
 
 		Vec3 targetedPosition = preserveCritical && hitResult instanceof EntityHitResult
 				? hitResult.getLocation()
 				: null;
 		BoundedTopK<EntityRenderState> selection = frame.displayEntitySelection;
-		Set<EntityRenderState> selected = frame.selectedDisplayEntities;
-		selection.reset(budget, prioritizeNearby);
-		selected.clear();
+		int displayCount = 0;
+		boolean overloaded = false;
 		for (int index = 0; index < states.size(); index++) {
 			EntityRenderState state = states.get(index);
 			if (state instanceof DisplayEntityRenderState) {
-				selection.offer(
-						state,
-						targetedPosition != null && matchesTarget(state, targetedPosition),
-						preserveCritical && state.distanceToCameraSq <= CRITICAL_EFFECT_DISTANCE_SQUARED,
-						state.distanceToCameraSq,
-						index
-				);
+				displayCount++;
+				if (!overloaded && displayCount > budget) {
+					// Defer all ranking until the first proven overload. Replaying only
+					// this bounded prefix avoids a full count pass on overloaded scenes.
+					selection.reset(budget, prioritizeNearby);
+					for (int prefix = 0; prefix <= index; prefix++) {
+						EntityRenderState candidate = states.get(prefix);
+						if (candidate instanceof DisplayEntityRenderState) {
+							offerDisplayCandidate(
+									selection,
+									candidate,
+									targetedPosition,
+									preserveCritical,
+									prefix
+							);
+						}
+					}
+					overloaded = true;
+				} else if (overloaded) {
+					offerDisplayCandidate(
+							selection,
+							state,
+							targetedPosition,
+							preserveCritical,
+							index
+					);
+				}
 			}
 		}
-		selection.addTo(selected);
+		if (!overloaded) {
+			return 0;
+		}
+
+		int[] selectedIndices = frame.prepareDisplaySelectionIndices(selection.size());
+		int selectedCount = selection.copyOriginalIndices(selectedIndices);
 		selection.clear();
+		Arrays.sort(selectedIndices, 0, selectedCount);
+		int selectedCursor = 0;
+		int rawIndex = 0;
+		int removed = 0;
 		Iterator<EntityRenderState> iterator = states.iterator();
 		while (iterator.hasNext()) {
 			EntityRenderState state = iterator.next();
-			if (state instanceof DisplayEntityRenderState && !selected.contains(state)) {
-				iterator.remove();
+			if (state instanceof DisplayEntityRenderState) {
+				if (selectedCursor < selectedCount
+						&& selectedIndices[selectedCursor] == rawIndex) {
+					selectedCursor++;
+				} else {
+					iterator.remove();
+					removed++;
+				}
 			}
+			rawIndex++;
 		}
-		selected.clear();
-		return displayCount - budget;
+		return removed;
+	}
+
+	private static void offerDisplayCandidate(
+			BoundedTopK<EntityRenderState> selection,
+			EntityRenderState state,
+			@Nullable Vec3 targetedPosition,
+			boolean preserveCritical,
+			int originalIndex
+	) {
+		selection.offer(
+				state,
+				targetedPosition != null && matchesTarget(state, targetedPosition),
+				preserveCritical && state.distanceToCameraSq <= CRITICAL_EFFECT_DISTANCE_SQUARED,
+				state.distanceToCameraSq,
+				originalIndex
+		);
 	}
 
 	private static double blockDistanceSquared(@Nullable BlockPos blockPos, Vec3 cameraPosition) {
@@ -600,13 +743,13 @@ public final class VoltGuardEngine {
 	}
 
 	private static final class FrameState {
-		private final BoundedTopK<Particle> specialParticleSelection = new BoundedTopK<>();
-		private final BoundedTopK<Particle> generalParticleSelection = new BoundedTopK<>();
+		private final SpillAwareParticleSelector<Particle> particleSelection =
+				new SpillAwareParticleSelector<>();
 		private final BlockEntityGuardHandoff<BlockEntityRenderState> blockEntityHandoff =
 				new BlockEntityGuardHandoff<>();
 		private final BoundedTopK<EntityRenderState> displayEntitySelection = new BoundedTopK<>();
 		private final Set<Particle> selectedParticles = newIdentitySet();
-		private final Set<EntityRenderState> selectedDisplayEntities = newIdentitySet();
+		private int[] selectedDisplayEntityIndices = new int[0];
 		private boolean configured;
 		private boolean particleExtractionActive;
 		private boolean allParticlesSelected;
@@ -645,6 +788,12 @@ public final class VoltGuardEngine {
 			this.clearParticleSelection();
 		}
 
+		private void failOpenParticleSelection() {
+			this.allParticlesSelected = true;
+			this.suppressedParticles = 0;
+			this.clearParticleSelection();
+		}
+
 		private void finishFrame() {
 			this.configured = false;
 			this.particleExtractionActive = false;
@@ -657,18 +806,27 @@ public final class VoltGuardEngine {
 			this.allParticlesSelected = true;
 			this.suppressedParticles = 0;
 			this.clearSelections();
+			this.particleSelection.releaseStorage();
+			this.blockEntityHandoff.releaseStorage();
+			this.displayEntitySelection.releaseStorage();
+			this.selectedDisplayEntityIndices = new int[0];
 		}
 
 		private void clearSelections() {
 			this.clearParticleSelection();
 			this.abortBlockEntityHandoff();
 			this.displayEntitySelection.clear();
-			this.selectedDisplayEntities.clear();
+		}
+
+		private int[] prepareDisplaySelectionIndices(int required) {
+			if (this.selectedDisplayEntityIndices.length < required) {
+				this.selectedDisplayEntityIndices = new int[required];
+			}
+			return this.selectedDisplayEntityIndices;
 		}
 
 		private void clearParticleSelection() {
-			this.specialParticleSelection.clear();
-			this.generalParticleSelection.clear();
+			this.particleSelection.abort();
 			this.selectedParticles.clear();
 		}
 

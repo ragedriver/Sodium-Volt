@@ -1,5 +1,7 @@
 package com.ragedriver.sodiumvolt.client.smartfps;
 
+import com.ragedriver.sodiumvolt.client.performance.InspectorStatisticsDemand;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -18,6 +20,8 @@ public final class SmartFpsLogicTest {
 	}
 
 	public static void main(String[] arguments) {
+		statisticsGateStopsDisabledChurnAndPublishesTransitions();
+		testCancelSafePowerQueryOwnership();
 		testMinimizedIsImmediateAndExclusive();
 		testUnfocusedDelayAndImmediateRestore();
 		testCapPrecedenceAndVanillaCeiling();
@@ -32,6 +36,61 @@ public final class SmartFpsLogicTest {
 		testApcSuspensionTransitions();
 		testNormalization();
 		System.out.println("Smart FPS logic tests passed");
+	}
+
+	private static void statisticsGateStopsDisabledChurnAndPublishesTransitions() {
+		SmartFpsStatisticsGate gate = new SmartFpsStatisticsGate();
+		InspectorStatisticsDemand.publish(false);
+		check(gate.refresh(true && InspectorStatisticsDemand.isRequested())
+					== SmartFpsStatisticsGate.Action.NONE,
+				"a hidden Inspector must keep detailed Smart FPS publication dormant");
+		InspectorStatisticsDemand.publish(true);
+		check(gate.refresh(true && InspectorStatisticsDemand.isRequested())
+					== SmartFpsStatisticsGate.Action.PUBLISH,
+				"visible demand must publish Smart FPS state promptly");
+		InspectorStatisticsDemand.publish(false);
+		check(gate.refresh(true && InspectorStatisticsDemand.isRequested())
+					== SmartFpsStatisticsGate.Action.CLEAR,
+				"hiding must clear stale Smart FPS state once");
+		check(gate.refresh(false) == SmartFpsStatisticsGate.Action.NONE
+					&& gate.refresh(false) == SmartFpsStatisticsGate.Action.NONE,
+				"stable statistics-off cycles must skip comparisons and publication work");
+		check(gate.refresh(true) == SmartFpsStatisticsGate.Action.PUBLISH
+					&& gate.refresh(true) == SmartFpsStatisticsGate.Action.PUBLISH,
+				"toggle-on and later enabled cycles must publish current truthful limiter state");
+		gate.markPublished(4L);
+		check(gate.canExpose(true, 4L) && !gate.canExpose(true, 6L),
+				"an off-on revision skipped between limiter callbacks must hide the stale snapshot");
+		check(gate.refresh(true) == SmartFpsStatisticsGate.Action.PUBLISH,
+				"the next enabled limiter callback must still request a truthful publication");
+		gate.markPublished(6L);
+		check(gate.canExpose(true, 6L),
+				"the newly published revision must become immediately visible");
+		check(gate.refresh(false) == SmartFpsStatisticsGate.Action.CLEAR
+					&& gate.refresh(false) == SmartFpsStatisticsGate.Action.NONE,
+				"toggle-off must clear stale Inspector state once, then remain dormant");
+		gate.refresh(true);
+		gate.reset();
+		check(gate.refresh(false) == SmartFpsStatisticsGate.Action.NONE,
+				"lifecycle reset must not leak a stale statistics transition");
+		InspectorStatisticsDemand.publish(false);
+	}
+
+	private static void testCancelSafePowerQueryOwnership() {
+		SmartFpsPowerQueryGate gate = new SmartFpsPowerQueryGate();
+		long cancelled = gate.tryBegin();
+		check(cancelled != 0L && gate.isInFlight(),
+				"the first power query must acquire ownership");
+		gate.cancel();
+		long replacement = gate.tryBegin();
+		check(replacement != 0L && replacement != cancelled,
+				"rapid disable/re-enable must allow a new generation-tagged query");
+		gate.finish(cancelled);
+		check(gate.isInFlight(),
+				"a cancelled old query must not clear a newer query's ownership");
+		gate.finish(replacement);
+		check(!gate.isInFlight(),
+				"the current query must release its own ownership normally");
 	}
 
 	private static void testMinimizedIsImmediateAndExclusive() {

@@ -1,6 +1,7 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.privacy.PrivacyScreenshotEngine;
+import com.ragedriver.sodiumvolt.client.privacy.PrivacyCaptureFastGate;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.Hud;
@@ -17,7 +18,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesChat()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesChat()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -27,7 +29,8 @@ public abstract class PrivacyHudMixin {
 			GuiGraphicsExtractor graphics,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesDebugOverlay()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesDebugOverlay()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -38,7 +41,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesPlayerList()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesPlayerList()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -49,7 +53,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesScoreboard()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesScoreboard()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -60,7 +65,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesBossBars()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesBossBars()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -71,7 +77,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesTitlesAndActionBar()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesTitlesAndActionBar()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -82,7 +89,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesTitlesAndActionBar()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesTitlesAndActionBar()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -93,14 +101,16 @@ public abstract class PrivacyHudMixin {
 			boolean deferRendering,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesSubtitles()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesSubtitles()) {
 			callbackInfo.cancel();
 		}
 	}
 
 	@Inject(method = "extractDeferredSubtitles", at = @At("HEAD"), cancellable = true)
 	private void sodiumVolt$hideDeferredSubtitles(CallbackInfo callbackInfo) {
-		if (PrivacyScreenshotEngine.hidesSubtitles()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesSubtitles()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -111,7 +121,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesToastsAndSavingIndicator()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesToastsAndSavingIndicator()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -122,7 +133,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesGameplayHud()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesGameplayHud()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -133,7 +145,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesGameplayHud()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesGameplayHud()) {
 			callbackInfo.cancel();
 		}
 	}
@@ -144,7 +157,8 @@ public abstract class PrivacyHudMixin {
 			DeltaTracker deltaTracker,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesGameplayHud()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesGameplayHud()) {
 			callbackInfo.cancel();
 		}
 	}

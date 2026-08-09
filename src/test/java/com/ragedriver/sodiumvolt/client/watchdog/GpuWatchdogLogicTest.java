@@ -20,6 +20,7 @@ public final class GpuWatchdogLogicTest {
 		testSuppressionAndClockSafety();
 		testCooldownCapAndSaturation();
 		testLifecycleLateLatch();
+		testFrameFastGateAndMidFrameDisable();
 		testReloadBoundsAndGenerations();
 		testRequestStoreStrictness();
 		testReportBoundsAndStrictness();
@@ -112,11 +113,18 @@ public final class GpuWatchdogLogicTest {
 		WatchdogLifecycleGate gate = new WatchdogLifecycleGate();
 		check(gate.setEnabled(true) && gate.claimThreadStart(),
 				"first enable may start exactly one daemon");
+		check(gate.isEnabled(), "enabled lifecycle state is visible without a monitor read");
+		long firstGeneration = gate.transitionGeneration();
 		check(!gate.claimThreadStart(), "duplicate start must be rejected");
 		gate.setEnabled(false);
 		check(!gate.isEnabled(), "runtime off");
+		long disabledGeneration = gate.transitionGeneration();
+		check(disabledGeneration != firstGeneration,
+				"disable wakes an enabled daemon and invalidates its policy generation");
 		check(gate.setEnabled(true) && !gate.claimThreadStart(),
 				"runtime on must reuse the original daemon");
+		check(gate.transitionGeneration() != disabledGeneration,
+				"quick off/on remains observable even if the daemon has not woken yet");
 		gate.beginStopping();
 		for (int frame = 0; frame < 10_000; frame++) {
 			check(!gate.setEnabled(true)
@@ -124,6 +132,27 @@ public final class GpuWatchdogLogicTest {
 							&& gate.isClientStopping(),
 					"late frames must never rearm after the permanent stop latch");
 		}
+	}
+
+	private static void testFrameFastGateAndMidFrameDisable() {
+		WatchdogFrameGate gate = new WatchdogFrameGate();
+		for (int frame = 0; frame < 10_000; frame++) {
+			check(!gate.requiresBegin(false) && !gate.requiresEnd(),
+					"never-enabled watchdog performs no heartbeat work");
+		}
+		check(gate.requiresBegin(true), "master enable schedules the first begin");
+		gate.enableRuntime();
+		check(gate.runtimeEnabled(), "runtime publication is visible to reload hooks");
+		gate.publishHeartbeat();
+		check(gate.requiresEnd(),
+				"a heartbeat started before a mid-frame disable must still end");
+		check(gate.finishHeartbeat() && !gate.finishHeartbeat(),
+				"the published heartbeat is cleared exactly once");
+		check(gate.requiresEnd(),
+				"runtime cleanup remains scheduled after heartbeat completion");
+		gate.disableRuntime();
+		check(!gate.requiresBegin(false) && !gate.requiresEnd(),
+				"disabled cleanup returns the watchdog to dormancy");
 	}
 
 	private static void testReloadBoundsAndGenerations() {

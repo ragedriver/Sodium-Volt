@@ -68,15 +68,21 @@ public final class ShieldedInputStream extends InputStream {
 	public int read() throws IOException {
 		ensureReadable();
 		long localAllowance = boundedLocalOperationLength(1L);
-		try (ShieldReadBudget.Reservation reservation = reserve(localAllowance)) {
+		ShieldReadBudget.Reservation reservation = reserve(localAllowance);
+		try {
 			int value = this.delegate.read();
 			if (value < 0) {
+				releaseReadLease();
 				finishContent();
 				return -1;
 			}
 			account(1L, reservation);
 			inspect(value);
+			releaseReadLease();
 			return value;
+		} catch (IOException | RuntimeException exception) {
+			releaseReadLease();
+			throw exception;
 		}
 	}
 
@@ -88,23 +94,31 @@ public final class ShieldedInputStream extends InputStream {
 			return 0;
 		}
 		long localAllowance = boundedLocalOperationLength(length);
-		try (ShieldReadBudget.Reservation reservation = reserve(localAllowance)) {
+		ShieldReadBudget.Reservation reservation = reserve(localAllowance);
+		try {
 			int boundedLength = (int) operationAllowance(reservation, localAllowance);
 			int read = this.delegate.read(bytes, offset, boundedLength);
 			if (read < 0) {
+				releaseReadLease();
 				finishContent();
 				return -1;
 			}
 			if (read == 0) {
+				releaseReadLease();
 				return 0;
 			}
 			if (read > boundedLength) {
 				this.rejected = true;
+				releaseReadLease();
 				throw new IOException("Resource pack stream returned an invalid read count");
 			}
 			account(read, reservation);
 			inspect(bytes, offset, read);
+			releaseReadLease();
 			return read;
+		} catch (IOException | RuntimeException exception) {
+			releaseReadLease();
+			throw exception;
 		}
 	}
 
@@ -158,15 +172,18 @@ public final class ShieldedInputStream extends InputStream {
 		long skipped = 0L;
 		while (skipped < amount) {
 			long localAllowance = boundedLocalOperationLength(amount - skipped);
-			try (ShieldReadBudget.Reservation reservation = reserve(localAllowance)) {
+			ShieldReadBudget.Reservation reservation = reserve(localAllowance);
+			try {
 				long requested = operationAllowance(reservation, localAllowance);
 				long current = this.delegate.skip(requested);
 				if (current < 0L || current > requested) {
 					this.rejected = true;
+					releaseReadLease();
 					throw new IOException("Resource pack stream returned an invalid skip count");
 				}
 				if (current > 0L) {
 					account(current, reservation);
+					releaseReadLease();
 					skipped += current;
 					continue;
 				}
@@ -175,11 +192,16 @@ public final class ShieldedInputStream extends InputStream {
 				// byte of progress so callers cannot spin indefinitely.
 				int value = this.delegate.read();
 				if (value < 0) {
+					releaseReadLease();
 					finishContent();
 					break;
 				}
 				account(1L, reservation);
+				releaseReadLease();
 				skipped++;
+			} catch (IOException | RuntimeException exception) {
+				releaseReadLease();
+				throw exception;
 			}
 		}
 		return skipped;
@@ -218,11 +240,15 @@ public final class ShieldedInputStream extends InputStream {
 	public void close() throws IOException {
 		if (this.closed.compareAndSet(false, true)) {
 			try {
-				this.delegate.close();
+				releaseReadLease();
 			} finally {
-				if (this.validationSkipBuffer != null) {
-					Arrays.fill(this.validationSkipBuffer, (byte) 0);
-					this.validationSkipBuffer = null;
+				try {
+					this.delegate.close();
+				} finally {
+					if (this.validationSkipBuffer != null) {
+						Arrays.fill(this.validationSkipBuffer, (byte) 0);
+						this.validationSkipBuffer = null;
+					}
 				}
 			}
 		}
@@ -247,7 +273,7 @@ public final class ShieldedInputStream extends InputStream {
 			long bytes,
 			ShieldReadBudget.Reservation reservation
 	) throws IOException {
-		boolean aggregateAccepted = reservation.commit(bytes);
+		boolean aggregateAccepted = reservation.consume(bytes);
 		boolean localAccepted = this.resourceBytes <= this.maximumResourceBytes - bytes;
 		this.resourceBytes = localAccepted
 				? this.resourceBytes + bytes
@@ -259,6 +285,9 @@ public final class ShieldedInputStream extends InputStream {
 	}
 
 	private ShieldReadBudget.Reservation reserve(long requested) throws IOException {
+		if (this.readReservation.active()) {
+			releaseReadLease();
+		}
 		ShieldReadBudget.Reservation reservation;
 		try {
 			reservation = this.readReservation.acquire(requested);
@@ -281,7 +310,13 @@ public final class ShieldedInputStream extends InputStream {
 			ShieldReadBudget.Reservation reservation,
 			long localAllowance
 	) {
-		return reservation.exhausted() ? localAllowance : reservation.allowance();
+		return reservation.exhausted()
+				? localAllowance
+				: Math.min(localAllowance, reservation.remainingAllowance());
+	}
+
+	private void releaseReadLease() {
+		this.readReservation.close();
 	}
 
 	private void inspect(int value) throws IOException {
@@ -362,6 +397,7 @@ public final class ShieldedInputStream extends InputStream {
 				&& this.reportedReasons.add(reason)
 				&& this.violationHandler.onViolation(reason)) {
 			this.rejected = true;
+			releaseReadLease();
 			throw new IOException("Resource pack rejected by Resource-Pack Shield policy");
 		}
 	}

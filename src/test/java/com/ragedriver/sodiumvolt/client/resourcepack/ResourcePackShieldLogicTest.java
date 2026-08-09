@@ -10,8 +10,11 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystemException;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -33,6 +36,7 @@ public final class ResourcePackShieldLogicTest {
 	}
 
 	public static void main(String[] arguments) throws Exception {
+		testDisabledTickSnapshotGate();
 		testPathPolicy();
 		testValidZipAndDirectory();
 		testZipLimitsAndMetadata();
@@ -41,8 +45,12 @@ public final class ResourcePackShieldLogicTest {
 		testShaderPolicy();
 		testOverlaySemanticsAndBudgets();
 		testHardDirectoryContainment();
+		testSingleAuthoritativeJsonValidation();
+		testDirectoryValidationCacheSafety();
+		testIdentityBoundDirectoryOpen();
 		testEnforcementAndReloadGate();
 		testReloadRejectionIsolation();
+		testPrivateReloadTokenOwnership();
 		testReloadContextPairing();
 		testAggregateScanBudget();
 		testLiveStreamAccountingAndClose();
@@ -56,6 +64,17 @@ public final class ResourcePackShieldLogicTest {
 		testSourceScope();
 		ResourcePackShieldConfigTestSupport.run();
 		System.out.println("Resource-Pack Shield logic tests passed");
+	}
+
+	private static void testDisabledTickSnapshotGate() {
+		check(!ShieldTickSnapshotGate.shouldCapture(4L, false, 4L, false),
+				"stable disabled Shield ticks must not allocate runtime or policy snapshots");
+		check(!ShieldTickSnapshotGate.shouldCapture(4L, true, 4L, true),
+				"stable enabled Shield ticks must process notices without allocating snapshots");
+		check(ShieldTickSnapshotGate.shouldCapture(5L, false, 4L, true),
+				"the enabled-to-disabled transition must capture once to perform cleanup");
+		check(ShieldTickSnapshotGate.shouldCapture(5L, true, 4L, true),
+				"a policy-only revision must refresh cached notification and policy control");
 	}
 
 	private static void testPathPolicy() {
@@ -165,6 +184,55 @@ public final class ResourcePackShieldLogicTest {
 			check(ZipPackScanner.scan(archive, policy(true)).reason()
 							== ShieldReason.UNSAFE_PATH,
 					"ZIP absolute path");
+
+			Map<String, byte[]> chunkedCentralDirectory = new LinkedHashMap<>();
+			for (int index = 0; index < 1_500; index++) {
+				chunkedCentralDirectory.put("assets/example/entry-" + index, new byte[0]);
+			}
+			writeZip(archive, chunkedCentralDirectory);
+			ShieldScanResult chunked = ZipPackScanner.scan(archive, policy(true));
+			check(chunked.accepted() && chunked.entries() == 1_500,
+					"buffered central-directory parsing crosses multiple bounded chunks");
+
+			writeZip(archive, Map.of(
+					"pack.mcmeta", json("{\"pack\":{\"description\":\"ok\"}}")
+			));
+			Path original = directory.resolve("original.zip");
+			Path replacement = directory.resolve("replacement.zip");
+			writeZip(replacement, Map.of("../escape.txt", new byte[]{1}));
+			ShieldScanResult identityBound = ZipPackScanner.scanForTesting(
+					archive,
+					policy(true),
+					ShieldOverlayPlan.EMPTY,
+					ZipPackScanner.deadline(2_000_000_000L),
+					() -> {
+						Files.move(archive, original);
+						Files.createSymbolicLink(archive, replacement);
+					}
+			);
+			check(identityBound.accepted(),
+					"central metadata and content validation stay on one NOFOLLOW archive handle");
+			Files.deleteIfExists(archive);
+			Files.move(original, archive);
+			Files.deleteIfExists(replacement);
+
+			boolean mutationRejected = false;
+			try {
+				ZipPackScanner.scanForTesting(
+						archive,
+						policy(true),
+						ShieldOverlayPlan.EMPTY,
+						ZipPackScanner.deadline(2_000_000_000L),
+						() -> writeZip(archive, Map.of(
+								"pack.mcmeta",
+								json("{\"pack\":{\"description\":\"no\"}}")
+						))
+				);
+			} catch (IOException expected) {
+				mutationRejected = true;
+			}
+			check(mutationRejected,
+					"same-inode content mutation cannot pass stale central metadata");
 		} finally {
 			Files.deleteIfExists(archive);
 			Files.deleteIfExists(directory);
@@ -249,9 +317,9 @@ public final class ResourcePackShieldLogicTest {
 					true, true, true, 100, 1_000_000, 1_000_000, 2_000_000,
 					200, 16_384, 128_000_000L, 3, 512, 32, 1_000_000_000L
 			);
-			check(ZipPackScanner.scan(archive, shallow).reason()
-							== ShieldReason.JSON_NESTING,
-					"mcmeta preflight uses JSON depth validation");
+			ShieldScanResult result = ZipPackScanner.scan(archive, shallow);
+			check(result.accepted() && result.inspectedBytes() == 0L,
+					"mcmeta body validation is deferred to its guarded live stream");
 		} finally {
 			Files.deleteIfExists(archive);
 			Files.deleteIfExists(directory);
@@ -301,6 +369,16 @@ public final class ResourcePackShieldLogicTest {
 		check(ShieldOverlayPlan.validate(List.of("high/"), defaults).reason()
 						== ShieldReason.UNSAFE_PATH,
 				"trailing-slash overlays are rejected before matching");
+		List<String> boundedOverlays = new ArrayList<>();
+		for (int index = 0; index < ShieldOverlayPlan.MAXIMUM_OVERLAY_PREFIXES; index++) {
+			boundedOverlays.add("overlay-" + index);
+		}
+		check(ShieldOverlayPlan.validate(boundedOverlays, defaults).accepted(),
+				"maximum bounded unique overlay count is accepted");
+		boundedOverlays.add("overlay-over-limit");
+		check(ShieldOverlayPlan.validate(boundedOverlays, defaults).reason()
+						== ShieldReason.ENTRY_LIMIT,
+				"adversarial overlay count is rejected before live path validation");
 
 		Path temporary = Files.createTempDirectory("sodium-volt-shield-overlays-");
 		Path directoryShader = temporary.resolve("directory-shader");
@@ -478,6 +556,274 @@ public final class ResourcePackShieldLogicTest {
 		}
 	}
 
+	private static void testSingleAuthoritativeJsonValidation() throws Exception {
+		Path temporary = Files.createTempDirectory("sodium-volt-shield-json-once-");
+		Path root = temporary.resolve("pack");
+		Path archive = temporary.resolve("pack.zip");
+		byte[] malformed = "{\"items\":[1,2}".getBytes(StandardCharsets.UTF_8);
+		byte[] deeplyNested = (
+				"[".repeat(129) + "0" + "]".repeat(129)
+		).getBytes(StandardCharsets.UTF_8);
+		try {
+			Files.createDirectory(root);
+			Files.write(root.resolve("pack.mcmeta"), deeplyNested);
+			ShieldScanResult directoryBootstrap =
+					DirectoryPackScanner.scan(root, policy(true));
+			check(directoryBootstrap.reason() == ShieldReason.JSON_NESTING
+							&& directoryBootstrap.inspectedBytes() > 0L,
+					"deeply nested directory root pack.mcmeta is rejected in preflight");
+			Files.delete(root.resolve("pack.mcmeta"));
+			Files.write(root.resolve("unused.json"), malformed);
+			ShieldScanResult directoryScan = DirectoryPackScanner.scan(root, policy(true));
+			check(directoryScan.accepted() && directoryScan.inspectedBytes() == 0L,
+					"directory preflight does not traverse an unread JSON body");
+
+			writeZip(archive, Map.of("pack.mcmeta", malformed));
+			ShieldScanResult archiveBootstrap = ZipPackScanner.scan(archive, policy(true));
+			check(archiveBootstrap.reason() == ShieldReason.JSON_NESTING
+							&& archiveBootstrap.inspectedBytes() > 0L,
+					"malformed ZIP root pack.mcmeta is rejected in preflight");
+			writeZip(archive, Map.of("unused.json", malformed));
+			ShieldScanResult archiveScan = ZipPackScanner.scan(archive, policy(true));
+			check(archiveScan.accepted() && archiveScan.inspectedBytes() == 0L,
+					"archive preflight does not inflate an unread JSON body");
+
+			AtomicInteger violations = new AtomicInteger();
+			try (ShieldedInputStream live = new ShieldedInputStream(
+					new ByteArrayInputStream(malformed),
+					malformed.length,
+					new ShieldReadBudget(malformed.length),
+					ShieldedInputStream.ContentKind.JSON,
+					policy(true),
+					reason -> {
+						check(reason == ShieldReason.JSON_NESTING,
+								"live JSON keeps the preflight rejection reason");
+						violations.incrementAndGet();
+						return true;
+					}
+			)) {
+				try {
+					int returned = live.read(new byte[malformed.length]);
+					throw new AssertionError(
+							"malformed live JSON returned " + returned + " bytes"
+					);
+				} catch (IOException expected) {
+					check(violations.get() == 1,
+							"one authoritative live validation reports one rejection");
+				}
+			}
+		} finally {
+			deleteTree(temporary);
+		}
+	}
+
+	private static void testDirectoryValidationCacheSafety() throws Exception {
+		Path temporary = Files.createTempDirectory("sodium-volt-shield-path-cache-");
+		Path root = temporary.resolve("pack");
+		Path assets = root.resolve("assets/example");
+		Path candidate = assets.resolve("item.json");
+		Path outside = temporary.resolve("outside.json");
+		try {
+			Files.createDirectories(assets);
+			Files.writeString(candidate, "{}");
+			Files.writeString(outside, "{}");
+			DirectoryCandidateValidator.Cache cache =
+					DirectoryCandidateValidator.newCache(List.of(root), 16);
+
+			check(cache.validateFile("assets/example/item.json") == ShieldReason.NONE,
+					"initial cached directory validation");
+			check(DirectoryCandidateValidator.retainedOperationPathsForTesting() == 0,
+					"directory validation must clear thread-local metadata path references");
+			check(cache.validateFile("assets/example/item.json") == ShieldReason.NONE
+							&& cache.pathPlanCount() == 1,
+					"path-plan cache hit still performs fresh metadata authorization");
+
+			Files.writeString(candidate, "{\"larger\":true}");
+			check(cache.validateFile("assets/example/item.json") == ShieldReason.NONE,
+					"size or timestamp mutation is freshly reauthorized");
+
+			Files.delete(candidate);
+			Files.createDirectory(candidate);
+			check(cache.validateFile("assets/example/item.json")
+							== ShieldReason.SPECIAL_FILE,
+					"cached regular file cannot hide a type replacement");
+			Files.delete(candidate);
+			if (createSymlink(candidate, outside)) {
+				check(cache.validateFile("assets/example/item.json")
+								== ShieldReason.SYMLINK,
+						"cached path cannot hide a symlink replacement");
+				Files.delete(candidate);
+			}
+			Files.writeString(candidate, "{}");
+
+			CompletableFuture<?>[] readers = new CompletableFuture<?>[8];
+			for (int index = 0; index < readers.length; index++) {
+				readers[index] = CompletableFuture.runAsync(() -> {
+					try {
+						for (int attempt = 0; attempt < 20; attempt++) {
+							check(cache.validateFile("assets/example/item.json")
+									== ShieldReason.NONE,
+									"concurrent cache validation");
+						}
+						check(DirectoryCandidateValidator.retainedOperationPathsForTesting() == 0,
+								"parallel reload workers must clear their bounded metadata scratch");
+					} catch (IOException exception) {
+						throw new CompletionException(exception);
+					}
+				});
+			}
+			CompletableFuture.allOf(readers).get(10, TimeUnit.SECONDS);
+
+			DirectoryCandidateValidator.Cache parallelMisses =
+					DirectoryCandidateValidator.newCache(List.of(root), 8);
+			CompletableFuture<?>[] builders = new CompletableFuture<?>[16];
+			for (int index = 0; index < builders.length; index++) {
+				String name = "assets/example/parallel-missing-" + index + ".json";
+				builders[index] = CompletableFuture.runAsync(() -> {
+					try {
+						check(parallelMisses.validateFile(name) == ShieldReason.NONE,
+								"parallel cache misses must build immutable plans safely");
+						check(DirectoryCandidateValidator.retainedOperationPathsForTesting() == 0,
+								"parallel miss cleanup must release thread-local path metadata");
+					} catch (IOException exception) {
+						throw new CompletionException(exception);
+					}
+				});
+			}
+			CompletableFuture.allOf(builders).get(10, TimeUnit.SECONDS);
+			check(parallelMisses.pathPlanCount() <= 8,
+					"parallel lock-free plan publication must retain its strict combined bound");
+
+			DirectoryCandidateValidator.Cache bounded =
+					DirectoryCandidateValidator.newCache(List.of(root), 2);
+			for (int index = 0; index < 8; index++) {
+				String name = "assets/example/missing-" + index + ".json";
+				check(bounded.validateFile(name) == ShieldReason.NONE,
+						"missing candidates remain safe");
+			}
+			check(bounded.pathPlanCount() <= 2,
+					"directory cache cardinality remains bounded");
+			List<Path> manyRoots = new ArrayList<>();
+			manyRoots.add(root);
+			for (int index = 0; index < 80; index++) {
+				manyRoots.add(root.resolve("absent-overlay-" + index));
+			}
+			DirectoryCandidateValidator.Cache manyRootCache =
+					DirectoryCandidateValidator.newCache(manyRoots, 16);
+			check(manyRootCache.validateFile("assets/example/item.json")
+							== ShieldReason.NONE
+							&& manyRootCache.pathPlanCount() == 0,
+					"large overlay sets validate without retaining expanded path plans");
+			cache.clear();
+			check(cache.pathPlanCount() == 0,
+					"pack lifecycle clear releases directory cache state");
+		} finally {
+			deleteTree(temporary);
+		}
+	}
+
+	private static void testIdentityBoundDirectoryOpen() throws Exception {
+		Path temporary = Files.createTempDirectory("sodium-volt-shield-secure-open-");
+		Path root = temporary.resolve("pack");
+		Path overlayOne = root.resolve("one");
+		Path overlayTwo = root.resolve("two");
+		Path outside = temporary.resolve("outside.txt");
+		try {
+			Files.createDirectories(root.resolve("assets/example"));
+			Files.createDirectories(overlayOne.resolve("assets/example"));
+			Files.createDirectories(overlayTwo.resolve("assets/example"));
+			Files.writeString(root.resolve("assets/example/value.txt"), "base");
+			Files.writeString(overlayOne.resolve("assets/example/value.txt"), "one");
+			Files.writeString(overlayTwo.resolve("assets/example/value.txt"), "two");
+			Files.writeString(outside, "outside");
+			DirectoryCandidateValidator.Cache cache = DirectoryCandidateValidator.newCache(
+					List.of(root, overlayOne, overlayTwo), 16
+			);
+			try (InputStream input = cache.openFile(
+					"assets/example/value.txt", false
+			).input()) {
+				check(input != null && new String(input.readAllBytes(), StandardCharsets.UTF_8)
+						.equals("two"), "identity-bound open preserves reverse overlay precedence");
+			}
+			try (InputStream input = cache.openFile(
+					"assets/example/value.txt", true
+			).input()) {
+				check(input != null && new String(input.readAllBytes(), StandardCharsets.UTF_8)
+						.equals("base"), "root resources use only the primary identity-bound root");
+			}
+			DirectoryCandidateValidator.SecureOpenResult missing = cache.openFile(
+					"assets/example/missing.txt", false
+			);
+			check(missing.input() == null && missing.reason() == ShieldReason.NONE,
+					"missing overlay resource remains a normal miss");
+
+			Path victim = root.resolve("assets/example/swap.txt");
+			Files.writeString(victim, "safe");
+			DirectoryCandidateValidator.Cache finalSwap =
+					DirectoryCandidateValidator.newCacheForTesting(
+							List.of(root), 4,
+							new DirectoryCandidateValidator.SecureOpenHook() {
+								@Override
+								public void beforeFinalOpen() throws IOException {
+									Files.delete(victim);
+									Files.createSymbolicLink(victim, outside);
+								}
+							}
+					);
+			DirectoryCandidateValidator.SecureOpenResult swapped = finalSwap.openFile(
+					"assets/example/swap.txt", true
+			);
+			check(swapped.input() == null && swapped.reason() != ShieldReason.NONE,
+					"final-entry swap cannot escape the pinned parent handle");
+			Files.deleteIfExists(victim);
+
+			Path rootBackup = temporary.resolve("pack-backup");
+			DirectoryCandidateValidator.Cache rootSwap =
+					DirectoryCandidateValidator.newCacheForTesting(
+							List.of(root), 4,
+							new DirectoryCandidateValidator.SecureOpenHook() {
+								@Override
+								public void afterRootValidation() throws IOException {
+									Files.move(root, rootBackup);
+									Files.createSymbolicLink(root, temporary);
+								}
+							}
+					);
+			DirectoryCandidateValidator.SecureOpenResult rootSwapped = rootSwap.openFile(
+					"assets/example/value.txt", true
+			);
+			check(rootSwapped.input() == null && rootSwapped.reason() != ShieldReason.NONE,
+					"root replacement cannot bind an outside directory handle");
+			check(DirectoryCandidateValidator.retainedOperationPathsForTesting() == 0,
+					"invalid-root early return clears thread-local paths and handles");
+			Files.deleteIfExists(root);
+			Files.move(rootBackup, root);
+
+			Path zipPath = temporary.resolve("fallback-fs.zip");
+			try (FileSystem zip = FileSystems.newFileSystem(
+					java.net.URI.create("jar:" + zipPath.toUri()), Map.of("create", "true")
+			)) {
+				Path zipRoot = zip.getPath("/pack");
+				Files.createDirectories(zipRoot.resolve("assets/example"));
+				Files.writeString(zipRoot.resolve("assets/example/value.txt"), "fallback");
+				DirectoryCandidateValidator.Cache fallback =
+						DirectoryCandidateValidator.newCache(
+								List.of(zipRoot, zipRoot.resolve("absent-overlay")), 4
+						);
+				try (InputStream input = fallback.openFile(
+						"assets/example/value.txt", false
+				).input()) {
+					check(input != null && new String(
+							input.readAllBytes(), StandardCharsets.UTF_8
+					).equals("fallback"),
+							"non-secure providers use identity-checked NOFOLLOW fallback open");
+				}
+			}
+		} finally {
+			deleteTree(temporary);
+		}
+	}
+
 	private static void testEnforcementAndReloadGate() {
 		check(ShieldEnforcement.shouldReject(policy(true), ShieldReason.UNSAFE_PATH),
 				"reject action");
@@ -535,6 +881,33 @@ public final class ResourcePackShieldLogicTest {
 				new ShieldReloadRejection(generation, true);
 		check(nextReload.guardInitialTask(initialA, generation) == initialA,
 				"next reload starts with fresh rejection state");
+	}
+
+	private static void testPrivateReloadTokenOwnership() {
+		ShieldReloadGate.PrivateTokenSource outer =
+				ShieldReloadGate.privateTokenSource(1, 0, false);
+		check(outer == ShieldReloadGate.PrivateTokenSource.OWNED
+					&& outer.ownsToken(),
+				"outer direct private reload owns exactly one token");
+
+		ShieldReloadGate.PrivateTokenSource nested =
+				ShieldReloadGate.privateTokenSource(2, 0, false);
+		check(nested == ShieldReloadGate.PrivateTokenSource.PRIVATE
+					&& !nested.ownsToken(),
+				"nested private reload borrows the outer private token");
+		check(ShieldReloadGate.privateTokenSource(3, 0, false)
+					== ShieldReloadGate.PrivateTokenSource.PRIVATE,
+				"deeper private nesting continues borrowing one token");
+
+		check(ShieldReloadGate.privateTokenSource(1, 0, true)
+					== ShieldReloadGate.PrivateTokenSource.PUBLIC,
+				"outer private wrapper borrows an available public token");
+		check(ShieldReloadGate.privateTokenSource(2, 0, true)
+					== ShieldReloadGate.PrivateTokenSource.PRIVATE,
+				"nested private wrapper borrows its immediate private token");
+		check(ShieldReloadGate.privateTokenSource(1, 1, false)
+					== ShieldReloadGate.PrivateTokenSource.DISABLED,
+				"public overflow forces a bounded disabled token");
 	}
 
 	private static void testReloadContextPairing() {
@@ -979,6 +1352,53 @@ public final class ResourcePackShieldLogicTest {
 	}
 
 	private static void testConcurrentLiveReadReservations() throws Exception {
+		ShieldReadBudget idleBudget = new ShieldReadBudget(8);
+		ShieldedInputStream idleShortReader = new ShieldedInputStream(
+				new ChunkedInputStream(new byte[2], 2), 8, idleBudget,
+				ShieldedInputStream.ContentKind.OTHER, policy(true), reason -> true
+		);
+		check(idleShortReader.read(new byte[8]) == 2
+					&& idleBudget.remainingBytes() == 6,
+				"short read releases speculative remainder before the stream becomes idle");
+		ShieldedInputStream peerAfterIdle = new ShieldedInputStream(
+				new ByteArrayInputStream(new byte[6]), 6, idleBudget,
+				ShieldedInputStream.ContentKind.OTHER, policy(true), reason -> true
+		);
+		check(peerAfterIdle.readNBytes(6).length == 6
+					&& idleBudget.consumedBytes() == 8,
+				"an idle short reader cannot strand aggregate capacity from peers");
+		idleShortReader.close();
+		peerAfterIdle.close();
+
+		byte[] singleBytePayload = new byte[4_096];
+		ShieldReadBudget amortizedBudget = new ShieldReadBudget(singleBytePayload.length);
+		try (ShieldedInputStream amortized = new ShieldedInputStream(
+				new ByteArrayInputStream(singleBytePayload),
+				singleBytePayload.length,
+				amortizedBudget,
+				ShieldedInputStream.ContentKind.OTHER,
+				policy(true),
+				reason -> true
+		)) {
+			for (int index = 0; index < singleBytePayload.length; index++) {
+				check(amortized.read() == 0, "single-byte leased read progress");
+			}
+			check(amortized.read() == -1, "single-byte leased read EOF");
+		}
+		check(amortizedBudget.consumedBytes() == singleBytePayload.length
+					&& amortizedBudget.remainingBytes() == 0L,
+				"single-byte reads preserve exact aggregate accounting without retained claims");
+
+		ShieldReadBudget uncontended = new ShieldReadBudget(64);
+		ShieldReadBudget.Reservation uncontendedReservation =
+				uncontended.newReservation();
+		for (int index = 0; index < 32; index++) {
+			check(uncontendedReservation.acquire(1).commit(1),
+					"uncontended atomic reservation commits");
+		}
+		check(uncontended.slowPathEntriesForTesting() == 0L,
+				"normal reservations never enter the pack-wide exhaustion monitor");
+
 		ShieldReadBudget reuseBudget = new ShieldReadBudget(2);
 		ShieldReadBudget.Reservation reusableToken = reuseBudget.newReservation();
 		check(reusableToken.acquire(1) == reusableToken,
@@ -1129,6 +1549,68 @@ public final class ResourcePackShieldLogicTest {
 				"parallel streams share one exclusive aggregate detection byte");
 		first.close();
 		second.close();
+
+		testReadBudgetInterruptionAndWakeupProgress();
+	}
+
+	private static void testReadBudgetInterruptionAndWakeupProgress() throws Exception {
+		ShieldReadBudget interruptedBudget = new ShieldReadBudget(1);
+		ShieldReadBudget.Reservation holder = interruptedBudget.newReservation();
+		holder.acquire(1);
+		AtomicReference<Throwable> interruptedResult = new AtomicReference<>();
+		CountDownLatch attempting = new CountDownLatch(1);
+		Thread interruptedWaiter = new Thread(() -> {
+			ShieldReadBudget.Reservation waiting = interruptedBudget.newReservation();
+			attempting.countDown();
+			try {
+				waiting.acquire(1);
+				interruptedResult.set(new AssertionError(
+						"interrupted aggregate waiter unexpectedly acquired"
+				));
+			} catch (InterruptedException expected) {
+				// Expected: interruption must escape without retaining a reservation.
+			} finally {
+				waiting.close();
+			}
+		}, "shield-budget-interruption");
+		interruptedWaiter.start();
+		check(attempting.await(5, TimeUnit.SECONDS),
+				"interrupted waiter reached aggregate acquisition");
+		awaitBlocked(interruptedWaiter, "aggregate interruption waiter");
+		interruptedWaiter.interrupt();
+		join(interruptedWaiter, "interrupted aggregate waiter");
+		check(interruptedResult.get() == null,
+				"interrupted waiter exits without a leaked reservation");
+		holder.close();
+		ShieldReadBudget.Reservation afterInterrupt =
+				interruptedBudget.newReservation();
+		check(afterInterrupt.acquire(1).commit(1),
+				"progress resumes after an interrupted exhausted waiter");
+
+		for (int attempt = 0; attempt < 64; attempt++) {
+			ShieldReadBudget budget = new ShieldReadBudget(1);
+			ShieldReadBudget.Reservation occupied = budget.newReservation();
+			occupied.acquire(1);
+			AtomicReference<Throwable> failure = new AtomicReference<>();
+			Thread waiter = new Thread(() -> {
+				ShieldReadBudget.Reservation reservation = budget.newReservation();
+				try {
+					if (!reservation.acquire(1).commit(1)) {
+						failure.set(new AssertionError("refunded allowance was rejected"));
+					}
+				} catch (Throwable throwable) {
+					failure.set(throwable);
+				} finally {
+					reservation.close();
+				}
+			}, "shield-budget-lost-wakeup-" + attempt);
+			waiter.start();
+			occupied.close();
+			join(waiter, "aggregate lost-wakeup racer");
+			if (failure.get() != null) {
+				throw new AssertionError("aggregate waiter lost progress", failure.get());
+			}
+		}
 	}
 
 	private static void testInvalidDirectSkipCounts() throws Exception {
@@ -1455,6 +1937,20 @@ public final class ResourcePackShieldLogicTest {
 	private static void join(Thread thread, String description) throws InterruptedException {
 		thread.join(5_000L);
 		check(!thread.isAlive(), description + " must not deadlock");
+	}
+
+	private static void awaitBlocked(Thread thread, String description) {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+		while (System.nanoTime() < deadline) {
+			Thread.State state = thread.getState();
+			if (state == Thread.State.WAITING
+					|| state == Thread.State.TIMED_WAITING
+					|| state == Thread.State.BLOCKED) {
+				return;
+			}
+			Thread.onSpinWait();
+		}
+		throw new AssertionError(description + " did not block at exhaustion");
 	}
 
 	private static boolean allZero(byte[] bytes) {

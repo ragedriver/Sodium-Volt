@@ -2,6 +2,7 @@ package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.mojang.blaze3d.opengl.DirectStateAccess;
 import com.mojang.blaze3d.opengl.GlBuffer;
+import com.ragedriver.sodiumvolt.client.performance.VramAllocationTracker;
 import com.ragedriver.sodiumvolt.client.performance.VramTrackedResource;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -23,6 +24,9 @@ public abstract class GlDirectBufferVramMixin {
 			boolean canPersistentMap,
 			CallbackInfo callbackInfo
 	) {
+		if (!VramAllocationTracker.shouldTrackAllocations()) {
+			return;
+		}
 		((VramTrackedResource) this).sodiumVolt$registerVramEstimate(size, false, false);
 	}
 

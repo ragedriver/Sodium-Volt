@@ -2,6 +2,7 @@ package com.ragedriver.sodiumvolt.client.config;
 
 import com.ragedriver.sodiumvolt.client.profile.ProfileIdentity;
 import com.ragedriver.sodiumvolt.client.profile.ProfileSettings;
+import com.ragedriver.sodiumvolt.client.performance.VoltTunerProfile;
 
 public final class VoltConfigFactoryResetTestSupport {
 	private VoltConfigFactoryResetTestSupport() {
@@ -24,7 +25,10 @@ public final class VoltConfigFactoryResetTestSupport {
 
 		guard.setVoltGuardEnabled(true);
 		inspector.setVoltInspectorEnabled(true);
+		check(inspector.isSamplingRequested(),
+				"Inspector visibility fast gate follows enabled overlay transitions");
 		performance.setAdaptivePerformanceControllerEnabled(true);
+		performance.setTunerProfile(VoltTunerProfile.AGGRESSIVE);
 		performance.setVisibilityAwareParticleSchedulerEnabled(true);
 		performance.setBlockEntityRenderBudgetingEnabled(true);
 		performance.setAnimatedTextureThrottlingEnabled(true);
@@ -39,11 +43,22 @@ public final class VoltConfigFactoryResetTestSupport {
 		guard.setAdaptiveWorkloadControl(false);
 		guard.setTargetFps(VoltGuardConfig.TARGET_FPS_MAX);
 		inspector.setShowInspectorOverlay(false);
+		check(!inspector.isSamplingRequested(),
+				"Inspector visibility fast gate hides immediately with its overlay");
 		inspector.setRefreshIntervalMs(VoltInspectorConfig.REFRESH_INTERVAL_MAX);
 		performance.setAdaptiveRenderDistance(false);
 		performance.setMinimumRenderDistance(VoltPerformanceConfig.MIN_RENDER_DISTANCE_MAX);
 		smartFps.setThrottleWhenMinimized(false);
 		smartFps.setMinimizedTargetFps(SmartFpsConfig.MINIMIZED_TARGET_MAX);
+		smartFps.setShowInspectorStatistics(false);
+		SmartFpsConfig.RuntimeSnapshot smartFpsSnapshot = smartFps.runtimeSnapshot();
+		check(smartFpsSnapshot.enabled()
+					&& !smartFpsSnapshot.throttleWhenMinimized()
+					&& smartFpsSnapshot.minimizedTargetFps()
+					== SmartFpsConfig.MINIMIZED_TARGET_MAX
+					&& !smartFpsSnapshot.showInspectorStatistics()
+					&& smartFpsSnapshot.revision() == smartFps.runtimeRevision(),
+				"Smart FPS runtime snapshot is coherent at one published revision");
 		recovery.setDetectUncleanSessions(false);
 		recovery.setSafeRenderDistance(VoltRecoveryConfig.SAFE_RENDER_DISTANCE_MAX);
 		watchdog.setIgnorePausedLoading(false);
@@ -59,6 +74,8 @@ public final class VoltConfigFactoryResetTestSupport {
 
 		long shieldRevision = shield.revision();
 		long watchdogRevision = watchdog.revision();
+		long smartFpsStatisticsRevision = smartFps.inspectorStatisticsRevision();
+		long smartFpsRuntimeRevision = smartFps.runtimeRevision();
 		VoltConfigFactoryReset.resetInMemory(configs);
 		check(VoltConfigFactoryReset.allFeatureMastersDisabled(configs),
 				"all 13 feature master toggles are disabled");
@@ -66,6 +83,7 @@ public final class VoltConfigFactoryResetTestSupport {
 					&& guard.getTargetFps() == VoltGuardConfig.TARGET_FPS_DEFAULT,
 				"Volt Guard subordinate defaults copied");
 		check(inspector.isShowInspectorOverlay()
+					&& !inspector.isSamplingRequested()
 					&& inspector.getRefreshIntervalMs()
 					== VoltInspectorConfig.REFRESH_INTERVAL_DEFAULT,
 				"Inspector subordinate defaults copied");
@@ -73,8 +91,12 @@ public final class VoltConfigFactoryResetTestSupport {
 					&& performance.getMinimumRenderDistance()
 					== VoltPerformanceConfig.MIN_RENDER_DISTANCE_DEFAULT,
 				"performance subordinate defaults copied");
+		check(performance.getTunerProfile() == VoltTunerProfile.VOLT_DEFAULT,
+				"Volt Tuner Profile returns to Volt Default");
 		check(smartFps.isThrottleWhenMinimized()
-					&& smartFps.getMinimizedTargetFps() == SmartFpsConfig.MINIMIZED_TARGET_DEFAULT,
+					&& smartFps.getMinimizedTargetFps() == SmartFpsConfig.MINIMIZED_TARGET_DEFAULT
+					&& smartFps.isShowInspectorStatistics()
+					&& smartFps.inspectorStatisticsRevision() > smartFpsStatisticsRevision,
 				"Smart FPS subordinate defaults copied");
 		check(recovery.isDetectUncleanSessions()
 					&& recovery.getSafeRenderDistance() == VoltRecoveryConfig.SAFE_RENDER_DISTANCE_DEFAULT,
@@ -93,6 +115,8 @@ public final class VoltConfigFactoryResetTestSupport {
 				"Profiles records and subordinate defaults reset");
 		check(shield.revision() > shieldRevision && watchdog.revision() > watchdogRevision,
 				"revision-bearing runtime configs remain monotonic");
+		check(smartFps.runtimeRevision() > smartFpsRuntimeRevision,
+				"Smart FPS factory reset invalidates its cached runtime snapshot");
 	}
 
 	private static void check(boolean condition, String message) {

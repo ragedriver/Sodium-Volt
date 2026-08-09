@@ -5,6 +5,7 @@ import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.vulkan.VulkanDevice;
 import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import com.ragedriver.sodiumvolt.client.performance.VramByteMath;
+import com.ragedriver.sodiumvolt.client.performance.VramAllocationTracker;
 import com.ragedriver.sodiumvolt.client.performance.VramTrackedResource;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -29,6 +30,9 @@ public abstract class VulkanTextureVramMixin {
 			int mipLevels,
 			CallbackInfo callbackInfo
 	) {
+		if (!VramAllocationTracker.shouldTrackAllocations()) {
+			return;
+		}
 		long bytes = VramByteMath.textureBytes(
 				width, height, depthOrLayers, mipLevels, format.blockSize()
 		);

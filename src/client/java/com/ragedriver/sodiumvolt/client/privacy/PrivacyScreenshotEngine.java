@@ -25,7 +25,6 @@ public final class PrivacyScreenshotEngine {
 			);
 
 	private static volatile PrivacyScreenshotPolicy activePolicy = INACTIVE_POLICY;
-	private static volatile boolean captureActive;
 	private static boolean captureIssued;
 	private static boolean coalescedNotice;
 
@@ -43,9 +42,14 @@ public final class PrivacyScreenshotEngine {
 	 * @return true when the vanilla F2 invocation has been handled or denied.
 	 */
 	public static boolean interceptVanillaCapture(Minecraft minecraft, boolean debugKey) {
+		if (debugKey && SharedConstants.DEBUG_PANORAMA_SCREENSHOT) {
+			return false;
+		}
+		if (!CONFIG.isEnabled()) {
+			return false;
+		}
 		PrivacyScreenshotConfig.RuntimeSnapshot snapshot = CONFIG.runtimeSnapshot();
-		if (!snapshot.enabled()
-				|| debugKey && SharedConstants.DEBUG_PANORAMA_SCREENSHOT) {
+		if (!snapshot.enabled()) {
 			return false;
 		}
 		PrivacyScreenshotPolicy policy = snapshot.policy();
@@ -68,14 +72,20 @@ public final class PrivacyScreenshotEngine {
 			return false;
 		}
 		PrivacyCaptureStateMachine.RequestResult result = STATE.request();
-		if (result == PrivacyCaptureStateMachine.RequestResult.COALESCED) {
+		if (result == PrivacyCaptureStateMachine.RequestResult.ACCEPTED) {
+			PrivacyCaptureFastGate.markPending();
+		} else {
 			coalescedNotice = true;
 		}
 		return true;
 	}
 
 	public static FrameScope beginRenderFrame(Minecraft minecraft) {
-		if (STATE.state() != PrivacyCaptureStateMachine.State.PENDING) {
+		if (!PrivacyCaptureFastGate.hasPendingCapture()) {
+			return FrameScope.INACTIVE;
+		}
+		if (!CONFIG.isEnabled()) {
+			reset();
 			return FrameScope.INACTIVE;
 		}
 		PrivacyScreenshotConfig.RuntimeSnapshot snapshot = CONFIG.runtimeSnapshot();
@@ -85,23 +95,27 @@ public final class PrivacyScreenshotEngine {
 		}
 		PrivacyScreenshotPolicy policy = snapshot.policy();
 		if (policy.blockOpenScreens() && hasOpenUi(minecraft)) {
-			STATE.reset();
-			coalescedNotice = false;
+			reset();
 			notifyFixed(minecraft, policy, "sodium-volt.notification.privacy.screen_blocked");
 			return FrameScope.INACTIVE;
 		}
 		PrivacyCaptureStateMachine.CaptureScope stateScope = STATE.beginFrame();
 		if (!stateScope.active()) {
+			PrivacyCaptureFastGate.clear();
 			return FrameScope.INACTIVE;
 		}
 		activePolicy = policy;
-		captureActive = true;
+		PrivacyCaptureFastGate.beginCapture();
 		captureIssued = false;
 		return new FrameScope(stateScope, minecraft, policy, true);
 	}
 
 	public static void captureRenderedFrame(Minecraft minecraft) {
-		if (!STATE.isActive() || captureIssued) {
+		if (!PrivacyCaptureFastGate.isCaptureActive() || captureIssued) {
+			return;
+		}
+		if (!CONFIG.isEnabled()) {
+			reset();
 			return;
 		}
 		captureIssued = true;
@@ -144,51 +158,51 @@ public final class PrivacyScreenshotEngine {
 	}
 
 	public static boolean hidesChat() {
-		return captureActive && activePolicy.hideChat();
+		return activePolicy.hideChat();
 	}
 
 	public static boolean hidesDebugOverlay() {
-		return captureActive && activePolicy.hideDebugOverlay();
+		return activePolicy.hideDebugOverlay();
 	}
 
 	public static boolean hidesPlayerList() {
-		return captureActive && activePolicy.hidePlayerList();
+		return activePolicy.hidePlayerList();
 	}
 
 	public static boolean hidesScoreboard() {
-		return captureActive && activePolicy.hideScoreboard();
+		return activePolicy.hideScoreboard();
 	}
 
 	public static boolean hidesBossBars() {
-		return captureActive && activePolicy.hideBossBars();
+		return activePolicy.hideBossBars();
 	}
 
 	public static boolean hidesTitlesAndActionBar() {
-		return captureActive && activePolicy.hideTitlesAndActionBar();
+		return activePolicy.hideTitlesAndActionBar();
 	}
 
 	public static boolean hidesSubtitles() {
-		return captureActive && activePolicy.hideSubtitles();
+		return activePolicy.hideSubtitles();
 	}
 
 	public static boolean hidesToastsAndSavingIndicator() {
-		return captureActive && activePolicy.hideToastsAndSavingIndicator();
+		return activePolicy.hideToastsAndSavingIndicator();
 	}
 
 	public static boolean hidesNameTags() {
-		return captureActive && activePolicy.hideNameTags();
+		return activePolicy.hideNameTags();
 	}
 
 	public static boolean hidesGameplayHud() {
-		return captureActive && activePolicy.hideGameplayHud();
+		return activePolicy.hideGameplayHud();
 	}
 
 	public static boolean hidesHeldItem() {
-		return captureActive && activePolicy.hideHeldItem();
+		return activePolicy.hideHeldItem();
 	}
 
 	public static boolean isCaptureActive() {
-		return captureActive;
+		return PrivacyCaptureFastGate.isCaptureActive();
 	}
 
 	public static void resetForFactoryDefaults() {
@@ -246,7 +260,7 @@ public final class PrivacyScreenshotEngine {
 
 	private static synchronized void reset() {
 		STATE.reset();
-		captureActive = false;
+		PrivacyCaptureFastGate.clear();
 		activePolicy = INACTIVE_POLICY;
 		captureIssued = false;
 		coalescedNotice = false;
@@ -280,6 +294,10 @@ public final class PrivacyScreenshotEngine {
 				return;
 			}
 			this.closed = true;
+			if (!PrivacyCaptureFastGate.isCaptureActive()) {
+				this.stateScope.close();
+				return;
+			}
 			if (!captureIssued) {
 				notifyFixed(
 						this.minecraft,
@@ -287,7 +305,7 @@ public final class PrivacyScreenshotEngine {
 						"sodium-volt.notification.privacy.failed"
 				);
 			}
-			captureActive = false;
+			PrivacyCaptureFastGate.clear();
 			activePolicy = INACTIVE_POLICY;
 			captureIssued = false;
 			this.stateScope.close();

@@ -36,7 +36,7 @@ public final class PrivacyScreenshotConfig {
 	private static final AtomicBoolean LOAD_FAILURE_LOGGED = new AtomicBoolean();
 	private static final AtomicBoolean SAVE_FAILURE_LOGGED = new AtomicBoolean();
 
-	private boolean enabled;
+	private volatile boolean enabled;
 	private boolean hideChat = true;
 	private boolean hideDebugOverlay = true;
 	private boolean hidePlayerList = true;
@@ -65,7 +65,7 @@ public final class PrivacyScreenshotConfig {
 		return new PrivacyScreenshotConfig();
 	}
 
-	public synchronized boolean isEnabled() {
+	public boolean isEnabled() {
 		return this.enabled;
 	}
 

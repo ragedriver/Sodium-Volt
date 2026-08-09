@@ -56,7 +56,15 @@ public final class VisibilityAwareParticleScheduler {
 	private static final int MAXIMUM_INSPECTOR_TYPE_LINES = 3;
 	private static final VoltPerformanceConfig CONFIG = VoltPerformanceConfig.getInstance();
 	private static final Stats STATS = new Stats();
-	private static FrameState frameState;
+	private static final StatisticsCollectionGate STATISTICS_GATE = new StatisticsCollectionGate();
+	private static final VapsCycleSettings.Simulation SIMULATION_SETTINGS =
+			new VapsCycleSettings.Simulation();
+	private static final VapsCycleSettings.Render RENDER_SETTINGS =
+			new VapsCycleSettings.Render();
+	private static final VapsDirectVisibilityState DIRECT_VISIBILITY =
+			new VapsDirectVisibilityState();
+	private static final VapsLazyState<FrameState> FRAME_STATE =
+			new VapsLazyState<>(FrameState::new);
 	private static boolean renderFailureLogged;
 	private static boolean simulationFailureLogged;
 	private static boolean schedulerActive;
@@ -89,8 +97,72 @@ public final class VisibilityAwareParticleScheduler {
 		}
 
 		schedulerActive = true;
-		FrameState frame = frameState();
+		FrameState frame = FRAME_STATE.peek();
 		try {
+			STATISTICS_GATE.refresh(
+					true,
+					CONFIG.isVapsShowInspectorStatistics()
+							&& InspectorStatisticsDemand.isRequested()
+			);
+			VapsCycleSettings.Render settings = RENDER_SETTINGS.capture(
+					true,
+					STATISTICS_GATE.shouldCollect(),
+					CONFIG.isVapsPrioritizeInFrustum(),
+					CONFIG.isVapsSkipBehindCamera(),
+					CONFIG.isVapsPreserveCriticalParticles(),
+					CONFIG.isVapsCoalesceAmbientParticles(),
+					CONFIG.isVapsPerTypeRenderLimits(),
+					CONFIG.getVapsCriticalReserve(),
+					CONFIG.getVapsPerTypeRenderLimit(),
+					CONFIG.getVapsAmbientPerCell()
+			);
+			VapsHotPathGate.publishRender(true);
+			boolean collectStatistics = settings.collectStatistics();
+			boolean prioritizeInFrustum = settings.prioritizeInFrustum();
+			boolean skipBehind = settings.skipBehindCamera();
+			boolean preserveCritical = settings.preserveCritical();
+			boolean coalesceAmbient = settings.coalesceAmbient();
+			boolean limitPerType = settings.perTypeLimits();
+			int criticalReserve = settings.criticalReserve();
+			int perTypeLimit = settings.perTypeLimit();
+			int ambientLimit = settings.ambientLimit();
+			int particleCountUpperBound = skipBehind || limitPerType || coalesceAmbient
+					? particleCountUpperBound(particleGroups)
+					: 0;
+			if (VapsRenderFastPath.canSkipPlanning(
+					skipBehind,
+					limitPerType,
+					perTypeLimit,
+					coalesceAmbient,
+					ambientLimit,
+					particleCountUpperBound
+			)) {
+				if (frame != null) {
+					frame.useRenderFastPath();
+				}
+				if (skipBehind) {
+					Vec3 cameraPosition = camera.position();
+					Vector3fc forward = camera.forwardVector();
+					DIRECT_VISIBILITY.begin(
+							preserveCritical,
+							criticalReserve,
+							cameraPosition.x,
+							cameraPosition.y,
+							cameraPosition.z,
+							forward.x(),
+							forward.y(),
+							forward.z()
+					);
+					VapsHotPathGate.publishRender(true);
+				} else {
+					DIRECT_VISIBILITY.disable();
+					RENDER_SETTINGS.disable();
+					VapsHotPathGate.publishRender(false);
+				}
+				return;
+			}
+			DIRECT_VISIBILITY.disable();
+			frame = FRAME_STATE.acquire();
 			frame.begin(
 					prepareVoltGuardHandoff,
 					particleCountFor(particleGroups, ParticleRenderType.SINGLE_QUADS),
@@ -98,14 +170,6 @@ public final class VisibilityAwareParticleScheduler {
 			);
 			Vec3 cameraPosition = camera.position();
 			Vector3fc forward = camera.forwardVector();
-			boolean prioritizeInFrustum = CONFIG.isVapsPrioritizeInFrustum();
-			boolean skipBehind = CONFIG.isVapsSkipBehindCamera();
-			boolean preserveCritical = CONFIG.isVapsPreserveCriticalParticles();
-			boolean coalesceAmbient = CONFIG.isVapsCoalesceAmbientParticles();
-			boolean limitPerType = CONFIG.isVapsPerTypeRenderLimits();
-			int criticalReserve = CONFIG.getVapsCriticalReserve();
-			int perTypeLimit = CONFIG.getVapsPerTypeRenderLimit();
-			int ambientLimit = CONFIG.getVapsAmbientPerCell();
 
 			particleGroups:
 			for (Map.Entry<ParticleRenderType, ParticleGroup<?>> entry : particleGroups.entrySet()) {
@@ -120,9 +184,12 @@ public final class VisibilityAwareParticleScheduler {
 						break particleGroups;
 					}
 					frame.scannedCount++;
-					if (!frame.addScanned(particle)) {
+					int decisionToken = frame.record(particle);
+					if (decisionToken == VapsIdentityDecisionTable.SATURATED_TOKEN) {
 						frame.truncated = true;
-						STATS.markSaturated();
+						if (collectStatistics) {
+							STATS.markSaturated();
+						}
 						break particleGroups;
 					}
 					ParticlePositionAccessor position = (ParticlePositionAccessor) particle;
@@ -141,6 +208,7 @@ public final class VisibilityAwareParticleScheduler {
 					if (critical && frame.limiter.tryCritical(criticalReserve)) {
 						selectParticleForFrame(
 								frame,
+								decisionToken,
 								particle,
 								renderType,
 								visible,
@@ -148,7 +216,7 @@ public final class VisibilityAwareParticleScheduler {
 						);
 						continue;
 					}
-					if (critical) {
+					if (critical && collectStatistics) {
 						STATS.addCriticalOverflow();
 					}
 
@@ -159,14 +227,14 @@ public final class VisibilityAwareParticleScheduler {
 							&& xDistance * forward.x()
 							+ yDistance * forward.y()
 							+ zDistance * forward.z() < 0.0D) {
-						if (visible) {
+						if (visible && collectStatistics) {
 							STATS.addBehind(particle.getClass());
 						}
 						continue;
 					}
 
 					if (limitPerType && !frame.limiter.tryType(particle.getClass(), perTypeLimit)) {
-						if (visible) {
+						if (visible && collectStatistics) {
 							STATS.addPerType(particle.getClass());
 						}
 						continue;
@@ -182,7 +250,7 @@ public final class VisibilityAwareParticleScheduler {
 								cellZ,
 								ambientLimit
 						)) {
-							if (visible) {
+							if (visible && collectStatistics) {
 								STATS.addCoalesced(particle.getClass());
 							}
 							continue;
@@ -190,6 +258,7 @@ public final class VisibilityAwareParticleScheduler {
 					}
 					selectParticleForFrame(
 							frame,
+							decisionToken,
 							particle,
 							renderType,
 							visible,
@@ -197,12 +266,14 @@ public final class VisibilityAwareParticleScheduler {
 					);
 				}
 			}
-			if (frame.truncated) {
+			if (frame.truncated && collectStatistics) {
 				STATS.addTruncatedFrame();
 			}
 			if (frame.limiter.isSaturated()) {
 				frame.saturated = true;
-				STATS.markSaturated();
+				if (collectStatistics) {
+					STATS.markSaturated();
+				}
 			}
 			if (frame.truncated) {
 				frame.abortGuardHandoff();
@@ -210,7 +281,12 @@ public final class VisibilityAwareParticleScheduler {
 				frame.completeGuardHandoff(frame.scannedCount);
 			}
 		} catch (RuntimeException | LinkageError exception) {
-			frame.disable();
+			STATISTICS_GATE.disable();
+			RENDER_SETTINGS.disable();
+			VapsHotPathGate.publishRender(false);
+			if (frame != null) {
+				frame.disable();
+			}
 			if (!renderFailureLogged) {
 				renderFailureLogged = true;
 				SodiumVolt.LOGGER.warn("VAPS render scheduling failed open; vanilla extraction will continue", exception);
@@ -219,7 +295,10 @@ public final class VisibilityAwareParticleScheduler {
 	}
 
 	public static ParticleEligibilityHandoff<Particle> particleEligibilityHandoff() {
-		FrameState frame = frameState;
+		if (!VapsHotPathGate.renderActive()) {
+			return null;
+		}
+		FrameState frame = FRAME_STATE.peek();
 		if (frame == null || !frame.active || frame.guardHandoff == null
 				|| !frame.guardHandoff.isComplete()) {
 			return null;
@@ -228,61 +307,69 @@ public final class VisibilityAwareParticleScheduler {
 	}
 
 	public static boolean shouldRenderParticle(Particle particle) {
-		if (!isEnabled()) {
+		if (!VapsHotPathGate.renderActive()) {
 			return true;
 		}
-		FrameState frame = frameState;
+		if (DIRECT_VISIBILITY.active()) {
+			ParticlePositionAccessor position = (ParticlePositionAccessor) particle;
+			boolean critical = isCriticalParticle(particle);
+			boolean render = DIRECT_VISIBILITY.shouldRender(
+					particle,
+					critical,
+					position.sodiumVolt$getX(),
+					position.sodiumVolt$getY(),
+					position.sodiumVolt$getZ()
+			);
+			if (!render && RENDER_SETTINGS.collectStatistics()) {
+				STATS.addBehind(particle.getClass());
+			}
+			return render;
+		}
+		FrameState frame = FRAME_STATE.peek();
 		return frame == null
 				|| !frame.active
-				|| !frame.decisions.isScanned(particle)
-				|| frame.decisions.isSelected(particle);
+				|| frame.decisions.shouldRender(particle);
 	}
 
 	public static void endParticleExtraction() {
-		if (frameState != null) {
-			frameState.end();
+		FrameState frame = FRAME_STATE.peek();
+		if (VapsHotPathGate.renderActive() && frame != null) {
+			frame.end();
 		}
+		RENDER_SETTINGS.disable();
+		DIRECT_VISIBILITY.disable();
+		VapsHotPathGate.publishRender(false);
 	}
 
 	public static void tickParticle(Particle particle) {
-		if (!isEnabled() || !CONFIG.isVapsDistanceAwareSimulation()) {
-			particle.tick();
-			return;
-		}
-		Minecraft minecraft = Minecraft.getInstance();
-		if (minecraft.level == null
-				|| minecraft.player == null
-				|| minecraft.isPaused()
-				|| minecraft.gui.screen() != null
-				|| minecraft.gui.overlay() != null) {
+		VapsCycleSettings.Simulation settings = SIMULATION_SETTINGS;
+		if (!settings.active()) {
 			particle.tick();
 			return;
 		}
 
 		ParticlePositionAccessor position;
-		VapsDecisionLogic.AgeStep step;
+		long step;
 		double x;
 		double y;
 		double z;
 		try {
 			position = (ParticlePositionAccessor) particle;
-			double xDistance = position.sodiumVolt$getX() - minecraft.player.getX();
-			double yDistance = position.sodiumVolt$getY() - minecraft.player.getY();
-			double zDistance = position.sodiumVolt$getZ() - minecraft.player.getZ();
+			double xDistance = position.sodiumVolt$getX() - settings.playerX();
+			double yDistance = position.sodiumVolt$getY() - settings.playerY();
+			double zDistance = position.sodiumVolt$getZ() - settings.playerZ();
 			double distanceSquared = xDistance * xDistance + yDistance * yDistance + zDistance * zDistance;
-			int fullRateDistance = CONFIG.getVapsFullRateDistance();
-			double fullRateDistanceSquared = (double) fullRateDistance * fullRateDistance;
-			boolean critical = CONFIG.isVapsPreserveCriticalParticles()
+			boolean critical = settings.preserveCritical()
 					&& isCriticalParticle(particle)
 					&& Double.isFinite(distanceSquared)
-					&& distanceSquared > fullRateDistanceSquared
-					&& claimCriticalFullRateSlot();
+					&& distanceSquared > settings.fullRateDistanceSquared()
+					&& claimCriticalFullRateSlot(settings.criticalReserve());
 			if (VapsDecisionLogic.shouldRunFullTick(
 					true,
 					critical,
 					distanceSquared,
-					fullRateDistanceSquared,
-					CONFIG.getVapsFarTickInterval(),
+					settings.fullRateDistanceSquared(),
+					settings.farTickInterval(),
 					position.sodiumVolt$getAge()
 			)) {
 				particle.tick();
@@ -311,11 +398,13 @@ public final class VisibilityAwareParticleScheduler {
 			position.sodiumVolt$setPreviousX(x);
 			position.sodiumVolt$setPreviousY(y);
 			position.sodiumVolt$setPreviousZ(z);
-			position.sodiumVolt$setAge(step.age());
-			if (step.expires()) {
+			position.sodiumVolt$setAge(VapsDecisionLogic.ageOnlyStepAge(step));
+			if (VapsDecisionLogic.ageOnlyStepExpires(step)) {
 				particle.remove();
 			}
-			STATS.addSimulationSkip(particle.getClass());
+			if (settings.collectStatistics()) {
+				STATS.addSimulationSkip(particle.getClass());
+			}
 		} catch (RuntimeException | LinkageError exception) {
 			if (!simulationFailureLogged) {
 				simulationFailureLogged = true;
@@ -328,50 +417,89 @@ public final class VisibilityAwareParticleScheduler {
 	}
 
 	public static StatisticsSnapshot snapshotStatistics() {
-		if (!isEnabled() || !CONFIG.isVapsShowInspectorStatistics()) {
+		if (!isEnabled() || !CONFIG.isVapsShowInspectorStatistics()
+				|| !InspectorStatisticsDemand.isRequested()) {
 			return StatisticsSnapshot.EMPTY;
 		}
 		return STATS.snapshot(MAXIMUM_INSPECTOR_TYPE_LINES);
 	}
 
 	public static void beginSimulationTick() {
-		if (isEnabled()) {
-			schedulerActive = true;
-			criticalFullRateTicks = 0;
-		} else {
+		if (!isEnabled()) {
 			disableIfNeeded();
+			return;
 		}
+		STATISTICS_GATE.refresh(
+				true,
+				CONFIG.isVapsShowInspectorStatistics()
+						&& InspectorStatisticsDemand.isRequested()
+		);
+		schedulerActive = true;
+		criticalFullRateTicks = 0;
+		Minecraft minecraft = Minecraft.getInstance();
+		boolean eligible = CONFIG.isVapsDistanceAwareSimulation()
+				&& minecraft.level != null
+				&& minecraft.player != null
+				&& !minecraft.isPaused()
+				&& minecraft.gui.screen() == null
+				&& minecraft.gui.overlay() == null;
+		if (!eligible) {
+			SIMULATION_SETTINGS.disable();
+			VapsHotPathGate.publishSimulation(false);
+			return;
+		}
+		int fullRateDistance = CONFIG.getVapsFullRateDistance();
+		SIMULATION_SETTINGS.capture(
+				true,
+				true,
+				STATISTICS_GATE.shouldCollect(),
+				CONFIG.isVapsPreserveCriticalParticles(),
+				minecraft.player.getX(),
+				minecraft.player.getY(),
+				minecraft.player.getZ(),
+				(double) fullRateDistance * fullRateDistance,
+				CONFIG.getVapsFarTickInterval(),
+				CONFIG.getVapsCriticalReserve()
+		);
+		VapsHotPathGate.publishSimulation(true);
 	}
 
 	public static void onLevelChanged() {
-		if (frameState != null) {
-			frameState.disable();
+		FrameState frame = FRAME_STATE.release();
+		if (frame != null) {
+			frame.disable();
 		}
 		schedulerActive = false;
 		criticalFullRateTicks = 0;
+		SIMULATION_SETTINGS.disable();
+		RENDER_SETTINGS.disable();
+		DIRECT_VISIBILITY.disable();
+		DIRECT_VISIBILITY.releaseStorage();
+		VapsHotPathGate.clear();
+		STATISTICS_GATE.disable();
 		STATS.reset();
 	}
 
 	private static void disableIfNeeded() {
+		STATISTICS_GATE.disable();
 		if (!schedulerActive) {
 			return;
 		}
 		schedulerActive = false;
 		criticalFullRateTicks = 0;
-		if (frameState != null) {
-			frameState.disable();
+		SIMULATION_SETTINGS.disable();
+		RENDER_SETTINGS.disable();
+		DIRECT_VISIBILITY.disable();
+		DIRECT_VISIBILITY.releaseStorage();
+		VapsHotPathGate.clear();
+		FrameState frame = FRAME_STATE.release();
+		if (frame != null) {
+			frame.disable();
 		}
 	}
 
-	private static FrameState frameState() {
-		if (frameState == null) {
-			frameState = new FrameState();
-		}
-		return frameState;
-	}
-
-	private static boolean claimCriticalFullRateSlot() {
-		if (criticalFullRateTicks >= CONFIG.getVapsCriticalReserve()) {
+	private static boolean claimCriticalFullRateSlot(int reserve) {
+		if (criticalFullRateTicks >= reserve) {
 			return false;
 		}
 		criticalFullRateTicks++;
@@ -388,14 +516,29 @@ public final class VisibilityAwareParticleScheduler {
 				: ((ParticleGroupAccessor) group).sodiumVolt$getParticles().size();
 	}
 
+	private static int particleCountUpperBound(
+			Map<ParticleRenderType, ParticleGroup<?>> particleGroups
+	) {
+		int count = 0;
+		for (ParticleGroup<?> group : particleGroups.values()) {
+			Queue<Particle> particles = ((ParticleGroupAccessor) group).sodiumVolt$getParticles();
+			count = VapsRenderFastPath.saturatingAdd(count, particles.size());
+			if (count == Integer.MAX_VALUE) {
+				break;
+			}
+		}
+		return count;
+	}
+
 	private static void selectParticleForFrame(
 			FrameState frame,
+			int decisionToken,
 			Particle particle,
 			ParticleRenderType renderType,
 			boolean visible,
 			int sourceIndex
 	) {
-		frame.decisions.select(particle);
+		frame.decisions.selectRecorded(decisionToken);
 		if (frame.guardHandoff == null || !frame.guardHandoff.isRecording()) {
 			return;
 		}
@@ -513,17 +656,28 @@ public final class VisibilityAwareParticleScheduler {
 			}
 		}
 
-		private boolean addScanned(Particle particle) {
-			if (this.guardHandoff == null || !this.guardHandoff.isRecording()) {
-				return this.decisions.addScanned(particle);
-			}
-			VapsIdentityDecisionTable.AddResult result = this.decisions.addScannedResult(particle);
-			if (result == VapsIdentityDecisionTable.AddResult.EXISTING) {
+		private void useRenderFastPath() {
+			this.active = false;
+			this.decisions.releaseFrame();
+			this.scannedCount = 0;
+			this.truncated = false;
+			this.saturated = false;
+			this.quadSourceCount = 0;
+			this.itemPickupSourceCount = 0;
+			this.abortGuardHandoff();
+		}
+
+		private int record(Particle particle) {
+			int token = this.decisions.record(particle);
+			if (this.guardHandoff != null
+					&& this.guardHandoff.isRecording()
+					&& token != VapsIdentityDecisionTable.SATURATED_TOKEN
+					&& !VapsIdentityDecisionTable.wasInserted(token)) {
 				// A later occurrence can retroactively select an earlier one.
 				// Preserve exact identity semantics through Guard's raw fallback.
 				this.abortGuardHandoff();
 			}
-			return result != VapsIdentityDecisionTable.AddResult.SATURATED;
+			return token;
 		}
 
 		private void abortGuardHandoff() {
@@ -551,7 +705,8 @@ public final class VisibilityAwareParticleScheduler {
 	}
 
 	private static final class Stats {
-		private final Class<?>[] types = new Class<?>[MAXIMUM_STAT_TYPES];
+		private final BoundedIdentityIndex<Class<?>> types =
+				new BoundedIdentityIndex<>(MAXIMUM_STAT_TYPES);
 		private final long[] limitedByType = new long[MAXIMUM_STAT_TYPES];
 		private final long[] simulationSkipsByType = new long[MAXIMUM_STAT_TYPES];
 		private long behind;
@@ -599,21 +754,11 @@ public final class VisibilityAwareParticleScheduler {
 		}
 
 		private int typeIndex(Class<?> type) {
-			int firstEmpty = -1;
-			for (int index = 0; index < this.types.length; index++) {
-				if (this.types[index] == type) {
-					return index;
-				}
-				if (firstEmpty < 0 && this.types[index] == null) {
-					firstEmpty = index;
-				}
+			int index = this.types.index(type);
+			if (index < 0) {
+				this.saturated = true;
 			}
-			if (firstEmpty >= 0) {
-				this.types[firstEmpty] = type;
-				return firstEmpty;
-			}
-			this.saturated = true;
-			return -1;
+			return index;
 		}
 
 		private void markSaturated() {
@@ -627,15 +772,16 @@ public final class VisibilityAwareParticleScheduler {
 		private StatisticsSnapshot snapshot(int maximumTypes) {
 			ArrayList<TypeStatistic> top = new ArrayList<>(maximumTypes);
 			boolean[] selected = new boolean[MAXIMUM_STAT_TYPES];
+			int typeCount = this.types.size();
 			for (int output = 0; output < maximumTypes; output++) {
 				int best = -1;
 				long bestTotal = 0L;
-				for (int index = 0; index < this.types.length; index++) {
+				for (int index = 0; index < typeCount; index++) {
 					long total = VapsDecisionLogic.saturatingAdd(
 							this.limitedByType[index],
 							this.simulationSkipsByType[index]
 					);
-					if (!selected[index] && this.types[index] != null && total > bestTotal) {
+					if (!selected[index] && total > bestTotal) {
 						best = index;
 						bestTotal = total;
 					}
@@ -645,7 +791,7 @@ public final class VisibilityAwareParticleScheduler {
 				}
 				selected[best] = true;
 				top.add(new TypeStatistic(
-						particleLabel(this.types[best]),
+						particleLabel(this.types.keyAt(best)),
 						this.limitedByType[best],
 						this.simulationSkipsByType[best]
 				));
@@ -668,11 +814,11 @@ public final class VisibilityAwareParticleScheduler {
 		}
 
 		private void reset() {
-			for (int index = 0; index < this.types.length; index++) {
-				this.types[index] = null;
+			for (int index = 0; index < MAXIMUM_STAT_TYPES; index++) {
 				this.limitedByType[index] = 0L;
 				this.simulationSkipsByType[index] = 0L;
 			}
+			this.types.clear();
 			this.behind = 0L;
 			this.coalesced = 0L;
 			this.perType = 0L;

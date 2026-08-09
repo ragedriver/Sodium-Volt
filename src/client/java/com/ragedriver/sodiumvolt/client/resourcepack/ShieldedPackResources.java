@@ -41,7 +41,7 @@ final class ShieldedPackResources implements PackResources {
 			if (supplier != null) {
 				lease.markOpened();
 			}
-			return wrapSupplier(supplier, logicalPath);
+			return wrapSupplier(supplier, logicalPath, true);
 		}
 	}
 
@@ -59,7 +59,7 @@ final class ShieldedPackResources implements PackResources {
 			if (supplier != null) {
 				lease.markOpened();
 			}
-			return wrapSupplier(supplier, logicalPath);
+			return wrapSupplier(supplier, logicalPath, false);
 		}
 	}
 
@@ -85,7 +85,7 @@ final class ShieldedPackResources implements PackResources {
 						|| this.session.claimResourceOutput()) {
 					throw new ResourcePackShieldRejectedException();
 				}
-				output.accept(identifier, wrapSupplier(supplier, logicalPath));
+				output.accept(identifier, wrapSupplier(supplier, logicalPath, false));
 			});
 			lease.markOpened();
 		}
@@ -151,13 +151,18 @@ final class ShieldedPackResources implements PackResources {
 	@Override
 	public void close() {
 		if (this.closed.compareAndSet(false, true)) {
-			this.delegate.close();
+			try {
+				this.delegate.close();
+			} finally {
+				this.session.close();
+			}
 		}
 	}
 
 	private IoSupplier<InputStream> wrapSupplier(
 			IoSupplier<InputStream> supplier,
-			String logicalPath
+			String logicalPath,
+			boolean primaryOnly
 	) {
 		if (supplier == null) {
 			return null;
@@ -168,11 +173,21 @@ final class ShieldedPackResources implements PackResources {
 				return supplier.get();
 			}
 			if (this.session.isRejected()
-					|| this.session.validateLogicalPath(logicalPath)
-					|| this.session.validateDirectoryCandidates(logicalPath)) {
+					|| this.session.validateLogicalPath(logicalPath)) {
 				throw new IOException("Resource pack rejected by Resource-Pack Shield policy");
 			}
-			InputStream input = supplier.get();
+			InputStream input;
+			if (this.session.isDirectorySource()) {
+				input = this.session.openDirectoryResource(logicalPath, primaryOnly);
+				if (input == null) {
+					// Monitor-only mode records the identity/symlink violation but
+					// deliberately preserves vanilla compatibility. Reject mode never
+					// reaches this branch.
+					input = supplier.get();
+				}
+			} else {
+				input = supplier.get();
+			}
 			return this.session.wrap(input, contentKind);
 		};
 	}

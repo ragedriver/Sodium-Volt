@@ -3,6 +3,7 @@
 	"package": "com.ragedriver.sodiumvolt.client.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
+		"DebugScreenOverlayMixin",
 		"ElderGuardianParticleGroupMixin",
 		"FilePackResourcesSupplierMixin",
 		"FramerateLimitTrackerMixin",

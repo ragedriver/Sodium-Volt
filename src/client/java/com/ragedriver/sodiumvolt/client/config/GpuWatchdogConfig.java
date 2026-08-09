@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class GpuWatchdogConfig {
 	public static final int WARNING_THRESHOLD_MIN = 1;
@@ -65,7 +66,7 @@ public final class GpuWatchdogConfig {
 	private static final AtomicBoolean LOAD_FAILURE_LOGGED = new AtomicBoolean();
 	private static final AtomicBoolean SAVE_FAILURE_LOGGED = new AtomicBoolean();
 
-	private boolean gpuTimeoutWatchdogEnabled;
+	private volatile boolean gpuTimeoutWatchdogEnabled;
 	private int warningStallThresholdSeconds = WARNING_THRESHOLD_DEFAULT;
 	private int criticalTimeoutThresholdSeconds = CRITICAL_THRESHOLD_DEFAULT;
 	private int criticalConfirmationCount = CONFIRMATION_COUNT_DEFAULT;
@@ -81,7 +82,7 @@ public final class GpuWatchdogConfig {
 	private boolean writeSanitizedIncidentReport = true;
 	private boolean showInspectorStatistics = true;
 	private transient boolean wasEverEnabled;
-	private transient long revision;
+	private final transient AtomicLong revision = new AtomicLong();
 
 	private GpuWatchdogConfig() {
 	}
@@ -101,7 +102,7 @@ public final class GpuWatchdogConfig {
 	public void setGpuTimeoutWatchdogEnabled(boolean value) {
 		this.gpuTimeoutWatchdogEnabled = value;
 		this.wasEverEnabled |= value;
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getWarningStallThresholdSeconds() {
@@ -116,7 +117,7 @@ public final class GpuWatchdogConfig {
 				this.criticalTimeoutThresholdSeconds,
 				this.warningStallThresholdSeconds + 1
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getCriticalTimeoutThresholdSeconds() {
@@ -128,7 +129,7 @@ public final class GpuWatchdogConfig {
 				clamp(value, CRITICAL_THRESHOLD_MIN, CRITICAL_THRESHOLD_MAX),
 				this.warningStallThresholdSeconds + 1
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getCriticalConfirmationCount() {
@@ -139,7 +140,7 @@ public final class GpuWatchdogConfig {
 		this.criticalConfirmationCount = clamp(
 				value, CONFIRMATION_COUNT_MIN, CONFIRMATION_COUNT_MAX
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getStartupWorldGraceSeconds() {
@@ -150,7 +151,7 @@ public final class GpuWatchdogConfig {
 		this.startupWorldGraceSeconds = clampStep(
 				value, STARTUP_GRACE_MIN, STARTUP_GRACE_MAX, STARTUP_GRACE_STEP
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getResourceReloadGraceSeconds() {
@@ -161,7 +162,7 @@ public final class GpuWatchdogConfig {
 		this.resourceReloadGraceSeconds = clampStep(
 				value, RELOAD_GRACE_MIN, RELOAD_GRACE_MAX, RELOAD_GRACE_STEP
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public boolean isIgnorePausedLoading() {
@@ -170,7 +171,7 @@ public final class GpuWatchdogConfig {
 
 	public void setIgnorePausedLoading(boolean value) {
 		this.ignorePausedLoading = value;
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public boolean isIgnoreUnfocusedMinimized() {
@@ -179,7 +180,7 @@ public final class GpuWatchdogConfig {
 
 	public void setIgnoreUnfocusedMinimized(boolean value) {
 		this.ignoreUnfocusedMinimized = value;
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getSampleIntervalMillis() {
@@ -190,7 +191,7 @@ public final class GpuWatchdogConfig {
 		this.sampleIntervalMillis = clampStep(
 				value, SAMPLE_INTERVAL_MIN, SAMPLE_INTERVAL_MAX, SAMPLE_INTERVAL_STEP
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getIncidentCooldownSeconds() {
@@ -201,7 +202,7 @@ public final class GpuWatchdogConfig {
 		this.incidentCooldownSeconds = clampStep(
 				value, COOLDOWN_MIN, COOLDOWN_MAX, COOLDOWN_STEP
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public int getMaximumIncidentsPerSession() {
@@ -212,7 +213,7 @@ public final class GpuWatchdogConfig {
 		this.maximumIncidentsPerSession = clamp(
 				value, MAXIMUM_INCIDENTS_MIN, MAXIMUM_INCIDENTS_MAX
 		);
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public boolean isArmRecoveryNextLaunch() {
@@ -221,7 +222,7 @@ public final class GpuWatchdogConfig {
 
 	public void setArmRecoveryNextLaunch(boolean value) {
 		this.armRecoveryNextLaunch = value;
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public boolean isShowTransitionNotifications() {
@@ -230,7 +231,7 @@ public final class GpuWatchdogConfig {
 
 	public void setShowTransitionNotifications(boolean value) {
 		this.showTransitionNotifications = value;
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public boolean isWriteSanitizedIncidentReport() {
@@ -239,7 +240,7 @@ public final class GpuWatchdogConfig {
 
 	public void setWriteSanitizedIncidentReport(boolean value) {
 		this.writeSanitizedIncidentReport = value;
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public boolean isShowInspectorStatistics() {
@@ -248,11 +249,11 @@ public final class GpuWatchdogConfig {
 
 	public void setShowInspectorStatistics(boolean value) {
 		this.showInspectorStatistics = value;
-		this.revision++;
+		this.revision.incrementAndGet();
 	}
 
 	public long revision() {
-		return this.revision;
+		return this.revision.get();
 	}
 
 	public GpuWatchdogPolicy.Settings policySettings() {
@@ -269,9 +270,9 @@ public final class GpuWatchdogConfig {
 	}
 
 	public synchronized void resetToFactoryDefaults() {
-		long nextRevision = ConfigFactoryDefaults.nextRevision(this.revision);
+		long nextRevision = ConfigFactoryDefaults.nextRevision(this.revision.get());
 		ConfigFactoryDefaults.copyMutableFields(this, new GpuWatchdogConfig());
-		this.revision = nextRevision;
+		this.revision.set(nextRevision);
 	}
 
 	public synchronized void save() {
@@ -344,7 +345,7 @@ public final class GpuWatchdogConfig {
 			config.validateStoredValues();
 			config.normalize();
 			config.wasEverEnabled = config.gpuTimeoutWatchdogEnabled;
-			config.revision = 0L;
+			config.revision.set(0L);
 			return config;
 		} catch (IOException | RuntimeException | StackOverflowError exception) {
 			if (LOAD_FAILURE_LOGGED.compareAndSet(false, true)) {

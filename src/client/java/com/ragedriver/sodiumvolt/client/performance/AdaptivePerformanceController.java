@@ -26,7 +26,7 @@ public final class AdaptivePerformanceController {
 	private static final ApcControllerLogic CONTROLLER = new ApcControllerLogic();
 	private static final VoltPerformanceConfig CONFIG = VoltPerformanceConfig.getInstance();
 
-	private static boolean active;
+	private static volatile boolean active;
 	private static boolean runtimeFailed;
 	private static boolean wrongThreadLogged;
 	private static long previousFrameNanos;
@@ -67,6 +67,10 @@ public final class AdaptivePerformanceController {
 			SodiumVolt.LOGGER.error("Volt APC failed safely and has stopped for this session", exception);
 			restoreAfterFailure(minecraft);
 		}
+	}
+
+	public static boolean requiresRenderFrameTimestamp() {
+		return CONFIG.isAdaptivePerformanceControllerEnabled() || active;
 	}
 
 	public static boolean shouldThrottleAtlasAnimations() {

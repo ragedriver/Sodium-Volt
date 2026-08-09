@@ -50,6 +50,7 @@ public final class ResourcePackShieldEngine {
 
 	private static volatile long observedRevision = Long.MIN_VALUE;
 	private static volatile boolean runtimeEnabled;
+	private static volatile boolean runtimeShowTransitionNotifications;
 	private static volatile ShieldReason lastReason = ShieldReason.NONE;
 	private static volatile ShieldSourceKind lastSource = ShieldSourceKind.IGNORED;
 	private static volatile long lastEventLiveBytes;
@@ -81,6 +82,9 @@ public final class ResourcePackShieldEngine {
 	}
 
 	public static ReloadToken beginResourceReload() {
+		if (!CONFIG.isResourcePackShieldEnabled()) {
+			return ReloadToken.DISABLED;
+		}
 		ResourcePackShieldConfig.RuntimeSnapshot config = CONFIG.runtimeSnapshot();
 		refreshControl(config);
 		if (!runtimeEnabled) {
@@ -130,6 +134,9 @@ public final class ResourcePackShieldEngine {
 	public static void enterSynchronousReload(ReloadToken token) {
 		ShieldReloadContextStack<ReloadToken> context =
 				SYNCHRONOUS_RELOAD_CONTEXT.get();
+		if ((token == null || !token.counted()) && context == null) {
+			return;
+		}
 		if (context == null) {
 			context = new ShieldReloadContextStack<>(MAXIMUM_RELOAD_NESTING);
 			SYNCHRONOUS_RELOAD_CONTEXT.set(context);
@@ -346,9 +353,22 @@ public final class ResourcePackShieldEngine {
 	}
 
 	private static void onClientTick(Minecraft minecraft) {
+		if (!ShieldTickSnapshotGate.shouldCapture(
+				CONFIG.revision(),
+				CONFIG.isResourcePackShieldEnabled(),
+				observedRevision,
+				runtimeEnabled
+		)) {
+			processPendingNotice(minecraft);
+			return;
+		}
 		ResourcePackShieldConfig.RuntimeSnapshot config = CONFIG.runtimeSnapshot();
 		refreshControl(config);
-		if (!runtimeEnabled || !config.showTransitionNotifications()) {
+		processPendingNotice(minecraft);
+	}
+
+	private static void processPendingNotice(Minecraft minecraft) {
+		if (!runtimeEnabled || !runtimeShowTransitionNotifications) {
 			PENDING_NOTICE.set(null);
 			return;
 		}
@@ -400,6 +420,7 @@ public final class ResourcePackShieldEngine {
 		}
 		observedRevision = revision;
 		runtimeEnabled = enabled;
+		runtimeShowTransitionNotifications = config.showTransitionNotifications();
 		nextSequence(CONTROL_GENERATION);
 		ACTIVE_RELOADS.set(0);
 		AGGREGATE_SCAN_DEADLINE_NANOS.set(0L);

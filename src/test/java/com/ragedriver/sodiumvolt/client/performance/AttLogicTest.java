@@ -4,6 +4,10 @@ import net.minecraft.resources.Identifier;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class AttLogicTest {
 	private AttLogicTest() {
@@ -18,6 +22,11 @@ public final class AttLogicTest {
 		testBudgetsAndExemptionReserve();
 		testStateSpriteMappingAndFailOpenBounds();
 		testAnimationCycleContextComposition();
+		testDisabledTickTransitionCleanup();
+		testDisabledReloadDeferral();
+		testReloadGenerationRejectsStalePublication();
+		testReloadPublicationAcrossThreads();
+		testStatisticsOffHasNoCounterChurn();
 		testPersistentMappingFailOpenLatch();
 		testVisibilityGenerationRules();
 		testFailOpenRetryAndSaturation();
@@ -175,15 +184,25 @@ public final class AttLogicTest {
 
 	private static void testAnimationCycleContextComposition() {
 		AttAnimationCycleContext.clearForTesting();
+		for (int sprite = 0; sprite < 10_000; sprite++) {
+			check(!AttAnimationCycleContext.hasActiveCycle(),
+					"disabled animation-state hooks use one primitive cycle gate");
+		}
+		check(!AttAnimationCycleContext.initializedForTesting(),
+				"disabled animation-state hooks never initialize their ThreadLocal");
 		Identifier outer = Identifier.parse("minecraft:textures/atlas/blocks.png");
 		Identifier inner = Identifier.parse("minecraft:textures/atlas/particles.png");
 		boolean outerInstalled = AttAnimationCycleContext.push(outer, true);
-		check(outerInstalled && AttAnimationCycleContext.atlasLocation().equals(outer)
+		AttRuntimeSettings.AtlasCycle outerCycle = AttAnimationCycleContext.current();
+		check(outerInstalled && AttAnimationCycleContext.hasActiveCycle()
+				&& AttAnimationCycleContext.initializedForTesting()
+				&& AttAnimationCycleContext.atlasLocation().equals(outer)
 				&& AttAnimationCycleContext.isWarmup(),
 				"an atlas cycle must expose its location and warmup state to state ticks");
 		boolean innerInstalled = AttAnimationCycleContext.push(inner, false);
+		AttRuntimeSettings.AtlasCycle innerCycle = AttAnimationCycleContext.current();
 		check(innerInstalled && AttAnimationCycleContext.atlasLocation().equals(inner)
-				&& !AttAnimationCycleContext.isWarmup(),
+				&& !AttAnimationCycleContext.isWarmup() && innerCycle != outerCycle,
 				"a nested atlas cycle must temporarily replace the outer context");
 		AttAnimationCycleContext.pop(innerInstalled);
 		check(AttAnimationCycleContext.atlasLocation().equals(outer)
@@ -193,6 +212,12 @@ public final class AttLogicTest {
 		check(AttAnimationCycleContext.atlasLocation() == null
 				&& AttAnimationCycleContext.depthForTesting() == 0,
 				"the final unwind must clear all atlas references");
+		boolean reusedInstalled = AttAnimationCycleContext.push(inner, false);
+		check(reusedInstalled && AttAnimationCycleContext.current() == outerCycle
+					&& AttAnimationCycleContext.atlasLocation().equals(inner)
+					&& !AttAnimationCycleContext.isWarmup(),
+				"stable atlas cycles must reuse their depth slot and publish newly captured settings");
+		AttAnimationCycleContext.pop(reusedInstalled);
 
 		boolean[] installed = new boolean[9];
 		for (int index = 0; index < installed.length; index++) {
@@ -207,6 +232,123 @@ public final class AttLogicTest {
 				&& AttAnimationCycleContext.depthForTesting() == 0,
 				"overflow unwind must leave no stale render-thread context");
 		AttAnimationCycleContext.clearForTesting();
+	}
+
+	private static void testDisabledTickTransitionCleanup() {
+		AttRuntimeLifecycle lifecycle = new AttRuntimeLifecycle();
+		check(!lifecycle.observeAndShouldCleanup(false)
+					&& !lifecycle.observeAndShouldCleanup(false),
+				"stable disabled ATT ticks must skip repeated counter and visibility cleanup");
+		check(!lifecycle.observeAndShouldCleanup(true)
+					&& lifecycle.observeAndShouldCleanup(false)
+					&& !lifecycle.observeAndShouldCleanup(false),
+				"ATT disable must clean up exactly once and re-enable must establish a new transition");
+	}
+
+	private static void testDisabledReloadDeferral() {
+		AttExemptionReloadGate gate = new AttExemptionReloadGate();
+		check(gate.onResourceReload(false) == 0L,
+				"disabled ATT reloads must skip exemption resource discovery");
+		long activation = gate.onEnabledTick();
+		check(activation != 0L,
+				"enabling after a skipped reload must discover current exemptions once");
+		check(!gate.ready(),
+				"ATT must fail open while deferred exemptions are still stale");
+		check(gate.complete(activation).publish(),
+				"the current activation scan must publish");
+		check(gate.ready() && gate.onEnabledTick() == 0L,
+				"stable enabled ticks must not repeat exemption discovery");
+		long reload = gate.onResourceReload(true);
+		check(reload != 0L,
+				"enabled ATT reloads must discover updated exemptions immediately");
+		gate.complete(reload);
+		check(gate.onEnabledTick() == 0L,
+				"a completed enabled reload must not be repeated on the next tick");
+	}
+
+	private static void testReloadGenerationRejectsStalePublication() {
+		AttExemptionReloadGate gate = new AttExemptionReloadGate();
+		long first = gate.onEnabledTick();
+		check(first != 0L && gate.onResourceReload(true) == 0L,
+				"an in-flight scan owns the generation until completion");
+		AtomicInteger published = new AtomicInteger();
+		AttExemptionReloadGate.Completion stale = gate.complete(
+				first, () -> published.set(1)
+		);
+		check(!stale.publish() && published.get() == 0
+					&& stale.followUpGeneration() != 0L,
+				"a stale scan must never overwrite newer exemption state");
+		AttExemptionReloadGate.Completion latest = gate.complete(
+				stale.followUpGeneration(), () -> published.set(2)
+		);
+		check(latest.publish() && published.get() == 2 && gate.ready(),
+				"exactly one latest-generation follow-up must publish atomically");
+	}
+
+	private static void testReloadPublicationAcrossThreads() {
+		AttExemptionReloadGate gate = new AttExemptionReloadGate();
+		long initial = gate.onEnabledTick();
+		gate.complete(initial);
+		CountDownLatch dirtyPublished = new CountDownLatch(1);
+		CountDownLatch allowCompletion = new CountDownLatch(1);
+		AtomicBoolean reloadAccepted = new AtomicBoolean();
+		Thread reloadThread = new Thread(() -> {
+			long generation = gate.onResourceReload(true);
+			reloadAccepted.set(generation != 0L);
+			dirtyPublished.countDown();
+			try {
+				if (!allowCompletion.await(5L, TimeUnit.SECONDS)) {
+					return;
+				}
+			} catch (InterruptedException exception) {
+				Thread.currentThread().interrupt();
+				return;
+			}
+			AttExemptionReloadGate.Completion stale = gate.complete(generation);
+			if (stale.followUpGeneration() != 0L) {
+				gate.complete(stale.followUpGeneration());
+			}
+		}, "ATT reload publication test");
+		reloadThread.start();
+		try {
+			check(dirtyPublished.await(5L, TimeUnit.SECONDS),
+					"the reload thread must publish its dirty transition");
+			check(reloadAccepted.get() && !gate.ready() && gate.onEnabledTick() == 0L,
+					"the client thread must fail open while an enabled reload is pending");
+			check(gate.onResourceReload(true) == 0L,
+					"a reload arriving in flight must coalesce instead of starting a duplicate scan");
+			allowCompletion.countDown();
+			reloadThread.join(5_000L);
+			check(!reloadThread.isAlive() && gate.ready(),
+					"the completed reload must publish readiness back to the client thread");
+		} catch (InterruptedException exception) {
+			Thread.currentThread().interrupt();
+			throw new AssertionError("ATT reload publication test was interrupted", exception);
+		} finally {
+			allowCompletion.countDown();
+			if (reloadThread.isAlive()) {
+				reloadThread.interrupt();
+			}
+		}
+	}
+
+	private static void testStatisticsOffHasNoCounterChurn() {
+		AttDiagnosticCounters counters = new AttDiagnosticCounters();
+		for (int sprite = 0; sprite < 10_000; sprite++) {
+			counters.recordTicked(false);
+			counters.recordSkippedInvisible(false);
+			counters.recordSkippedCadence(false);
+			counters.recordSkippedBudget(false);
+			counters.recordProtected(false);
+			counters.recordExempt(false);
+		}
+		check(counters.mutationRevision() == 0L
+					&& counters.ticked() == 0L
+					&& counters.skippedBudget() == 0L,
+				"statistics-off atlas cycles do not mutate diagnostic counters");
+		counters.recordTicked(true);
+		check(counters.mutationRevision() == 1L && counters.ticked() == 1L,
+				"statistics-on cycles retain diagnostic accounting");
 	}
 
 	private static void testVisibilityGenerationRules() {

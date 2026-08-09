@@ -105,6 +105,14 @@ tasks.register("voltInspectorUnitTest", JavaExec) {
 	mainClass = "com.ragedriver.sodiumvolt.client.inspector.InspectorLogicTest"
 }
 
+tasks.register("voltDebugOverlayUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Sodium Volt's F3 debug-overlay placement and formatting tests."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.debug.SodiumVoltDebugLineTest"
+}
+
 tasks.register("voltPerformanceUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs Adaptive Performance Controller's dependency-free logic tests."
@@ -194,6 +202,7 @@ tasks.register("profilesUnitTest", JavaExec) {
 }
 
 tasks.test {
+	dependsOn tasks.voltDebugOverlayUnitTest
 	dependsOn tasks.voltGuardUnitTest
 	dependsOn tasks.voltInspectorUnitTest
 	dependsOn tasks.voltPerformanceUnitTest
@@ -211,6 +220,7 @@ tasks.test {
 }
 
 tasks.check.dependsOn tasks.voltGuardUnitTest
+tasks.check.dependsOn tasks.voltDebugOverlayUnitTest
 tasks.check.dependsOn tasks.voltInspectorUnitTest
 tasks.check.dependsOn tasks.voltPerformanceUnitTest
 tasks.check.dependsOn tasks.vapsUnitTest

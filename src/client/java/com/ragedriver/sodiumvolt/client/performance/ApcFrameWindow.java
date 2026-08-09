@@ -1,7 +1,5 @@
 package com.ragedriver.sodiumvolt.client.performance;
 
-import java.util.Arrays;
-
 final class ApcFrameWindow {
 	private static final long MINIMUM_FRAME_NANOS = 100_000L;
 	private static final long MAXIMUM_FRAME_NANOS = 1_000_000_000L;
@@ -44,9 +42,8 @@ final class ApcFrameWindow {
 		for (int index = 0; index < count; index++) {
 			sortingBuffer[index] = this.samples[(first + index) % this.samples.length];
 		}
-		Arrays.sort(sortingBuffer, 0, count);
 		int percentileIndex = Math.max(0, (int) Math.ceil(count * 0.95D) - 1);
-		return sortingBuffer[percentileIndex] / 1_000_000.0D;
+		return select(sortingBuffer, 0, count, percentileIndex) / 1_000_000.0D;
 	}
 
 	void clear() {
@@ -56,5 +53,70 @@ final class ApcFrameWindow {
 
 	private int clampWindow(int requestedWindow) {
 		return Math.max(1, Math.min(this.samples.length, requestedWindow));
+	}
+
+	/** Exact bounded linear-time selection using median-of-medians pivots. */
+	private static long select(long[] values, int from, int to, int target) {
+		int left = from;
+		int right = to;
+		while (true) {
+			int length = right - left;
+			if (length <= 5) {
+				insertionSort(values, left, right);
+				return values[target];
+			}
+			long pivot = medianOfMedians(values, left, right);
+			int less = left;
+			int scan = left;
+			int greater = right;
+			while (scan < greater) {
+				long value = values[scan];
+				if (value < pivot) {
+					swap(values, less++, scan++);
+				} else if (value > pivot) {
+					swap(values, scan, --greater);
+				} else {
+					scan++;
+				}
+			}
+			if (target < less) {
+				right = less;
+			} else if (target >= greater) {
+				left = greater;
+			} else {
+				return pivot;
+			}
+		}
+	}
+
+	private static long medianOfMedians(long[] values, int from, int to) {
+		int medians = 0;
+		for (int group = from; group < to; group += 5) {
+			int groupEnd = Math.min(group + 5, to);
+			insertionSort(values, group, groupEnd);
+			int median = group + (groupEnd - group - 1) / 2;
+			swap(values, from + medians, median);
+			medians++;
+		}
+		int medianTarget = from + (medians - 1) / 2;
+		return select(values, from, from + medians, medianTarget);
+	}
+
+	private static void insertionSort(long[] values, int from, int to) {
+		for (int index = from + 1; index < to; index++) {
+			long value = values[index];
+			int insertion = index;
+			while (insertion > from && values[insertion - 1] > value) {
+				values[insertion] = values[insertion - 1];
+				insertion--;
+			}
+			values[insertion] = value;
+		}
+	}
+
+	private static void swap(long[] values, int first, int second) {
+		long value = values[first];
+		values[first] = values[second];
+		values[second] = value;
 	}
 }

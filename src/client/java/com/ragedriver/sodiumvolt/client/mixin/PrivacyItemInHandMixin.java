@@ -2,6 +2,7 @@ package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.ragedriver.sodiumvolt.client.privacy.PrivacyScreenshotEngine;
+import com.ragedriver.sodiumvolt.client.privacy.PrivacyCaptureFastGate;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.ItemInHandRenderer;
 import net.minecraft.client.renderer.SubmitNodeCollector;
@@ -21,7 +22,8 @@ public abstract class PrivacyItemInHandMixin {
 			int lightCoords,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesHeldItem()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesHeldItem()) {
 			callbackInfo.cancel();
 		}
 	}

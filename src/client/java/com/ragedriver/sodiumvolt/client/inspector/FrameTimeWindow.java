@@ -1,7 +1,5 @@
 package com.ragedriver.sodiumvolt.client.inspector;
 
-import java.util.Arrays;
-
 public final class FrameTimeWindow {
 	private static final double NANOS_PER_MILLISECOND = 1_000_000.0D;
 	private static final long MINIMUM_FRAME_NANOS = 100_000L;
@@ -44,14 +42,13 @@ public final class FrameTimeWindow {
 			sortingBuffer[index] = value;
 			sum = saturatingAdd(sum, value);
 		}
-		Arrays.sort(sortingBuffer, 0, count);
 		return new Statistics(
 				count,
 				(sum / (double) count) / NANOS_PER_MILLISECOND,
-				percentile(sortingBuffer, count, 0.50D),
-				percentile(sortingBuffer, count, 0.95D),
-				percentile(sortingBuffer, count, 0.99D),
-				percentile(sortingBuffer, count, 0.995D)
+				percentileUnsorted(sortingBuffer, count, 0.50D),
+				percentileUnsorted(sortingBuffer, count, 0.95D),
+				percentileUnsorted(sortingBuffer, count, 0.99D),
+				percentileUnsorted(sortingBuffer, count, 0.995D)
 		);
 	}
 
@@ -71,6 +68,45 @@ public final class FrameTimeWindow {
 		int rank = (int) Math.ceil(Math.clamp(percentile, 0.0D, 1.0D) * count);
 		int index = Math.clamp(rank - 1, 0, count - 1);
 		return sortedNanos[index] / NANOS_PER_MILLISECOND;
+	}
+
+	private static double percentileUnsorted(long[] values, int count, double percentile) {
+		int rank = (int) Math.ceil(Math.clamp(percentile, 0.0D, 1.0D) * count);
+		return select(values, 0, count - 1, Math.clamp(rank - 1, 0, count - 1))
+				/ NANOS_PER_MILLISECOND;
+	}
+
+	private static long select(long[] values, int left, int right, int target) {
+		while (left < right) {
+			long pivot = values[(left + right) >>> 1];
+			int lower = left;
+			int cursor = left;
+			int upper = right;
+			while (cursor <= upper) {
+				long value = values[cursor];
+				if (value < pivot) {
+					swap(values, lower++, cursor++);
+				} else if (value > pivot) {
+					swap(values, cursor, upper--);
+				} else {
+					cursor++;
+				}
+			}
+			if (target < lower) {
+				right = lower - 1;
+			} else if (target > upper) {
+				left = upper + 1;
+			} else {
+				return values[target];
+			}
+		}
+		return values[left];
+	}
+
+	private static void swap(long[] values, int first, int second) {
+		long value = values[first];
+		values[first] = values[second];
+		values[second] = value;
 	}
 
 	private static long saturatingAdd(long first, long second) {

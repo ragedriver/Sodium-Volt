@@ -1,6 +1,7 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.privacy.PrivacyScreenshotEngine;
+import com.ragedriver.sodiumvolt.client.privacy.PrivacyCaptureFastGate;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.world.entity.Entity;
@@ -19,7 +20,8 @@ public abstract class PrivacyEntityRendererMixin {
 			float partialTicks,
 			CallbackInfoReturnable<EntityRenderState> callbackInfo
 	) {
-		if (!PrivacyScreenshotEngine.hidesNameTags()) {
+		if (!PrivacyCaptureFastGate.isCaptureActive()
+				|| !PrivacyScreenshotEngine.hidesNameTags()) {
 			return;
 		}
 		EntityRenderState state = callbackInfo.getReturnValue();

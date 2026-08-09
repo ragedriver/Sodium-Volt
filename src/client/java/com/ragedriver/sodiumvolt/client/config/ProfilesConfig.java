@@ -60,6 +60,10 @@ public final class ProfilesConfig {
 	private final BoundedProfileStore serverProfiles =
 			new BoundedProfileStore(MAXIMUM_SERVER_PROFILES);
 	private long revision;
+	private long identityContextRevision = 1L;
+	private volatile RuntimeControl runtimeControl = new RuntimeControl(
+			false, true, true, true, 1L
+	);
 
 	private ProfilesConfig() {
 	}
@@ -77,8 +81,12 @@ public final class ProfilesConfig {
 	}
 
 	public synchronized void setProfilesEnabled(boolean value) {
+		if (this.profilesEnabled != value) {
+			advanceIdentityContextRevision();
+		}
 		this.profilesEnabled = value;
 		this.revision++;
+		publishRuntimeControl();
 	}
 
 	public synchronized boolean isRestoreGlobalDefaultsOnMenu() {
@@ -88,6 +96,7 @@ public final class ProfilesConfig {
 	public synchronized void setRestoreGlobalDefaultsOnMenu(boolean value) {
 		this.restoreGlobalDefaultsOnMenu = value;
 		this.revision++;
+		publishRuntimeControl();
 	}
 
 	public synchronized boolean isSinglePlayerProfilesEnabled() {
@@ -95,8 +104,12 @@ public final class ProfilesConfig {
 	}
 
 	public synchronized void setSinglePlayerProfilesEnabled(boolean value) {
+		if (this.singlePlayerProfilesEnabled != value) {
+			advanceIdentityContextRevision();
+		}
 		this.singlePlayerProfilesEnabled = value;
 		this.revision++;
+		publishRuntimeControl();
 	}
 
 	public synchronized boolean isSpecificServerProfilesEnabled() {
@@ -104,8 +117,16 @@ public final class ProfilesConfig {
 	}
 
 	public synchronized void setSpecificServerProfilesEnabled(boolean value) {
+		if (this.specificServerProfilesEnabled != value) {
+			advanceIdentityContextRevision();
+		}
 		this.specificServerProfilesEnabled = value;
 		this.revision++;
+		publishRuntimeControl();
+	}
+
+	public RuntimeControl runtimeControl() {
+		return this.runtimeControl;
 	}
 
 	public synchronized boolean isGlobalDefaultsInitialized() {
@@ -114,6 +135,10 @@ public final class ProfilesConfig {
 
 	public synchronized long revision() {
 		return this.revision;
+	}
+
+	public synchronized long identityContextRevision() {
+		return this.identityContextRevision;
 	}
 
 	public synchronized ProfileSettings getGlobalDefaults() {
@@ -367,6 +392,8 @@ public final class ProfilesConfig {
 		this.singlePlayerProfiles.clear();
 		this.serverProfiles.clear();
 		this.revision = nextRevision;
+		advanceIdentityContextRevision();
+		publishRuntimeControl();
 	}
 
 	public synchronized void save() {
@@ -430,6 +457,7 @@ public final class ProfilesConfig {
 					MAXIMUM_SINGLE_PLAYER_PROFILES);
 			readRecords(root, "server_profiles", config.serverProfiles,
 					MAXIMUM_SERVER_PROFILES);
+			config.publishRuntimeControl();
 			return config;
 		} catch (IOException | RuntimeException | StackOverflowError exception) {
 			if (LOAD_FAILURE_LOGGED.compareAndSet(false, true)) {
@@ -476,6 +504,31 @@ public final class ProfilesConfig {
 	private synchronized void setServerTemplate(ProfileSettings settings) {
 		this.serverTemplate = settings.sanitized();
 		this.revision++;
+	}
+
+	private void advanceIdentityContextRevision() {
+		this.identityContextRevision = this.identityContextRevision == Long.MAX_VALUE
+				? 1L
+				: this.identityContextRevision + 1L;
+	}
+
+	private void publishRuntimeControl() {
+		this.runtimeControl = new RuntimeControl(
+				this.profilesEnabled,
+				this.restoreGlobalDefaultsOnMenu,
+				this.singlePlayerProfilesEnabled,
+				this.specificServerProfilesEnabled,
+				this.identityContextRevision
+		);
+	}
+
+	public record RuntimeControl(
+			boolean enabled,
+			boolean restoreGlobalDefaultsOnMenu,
+			boolean singlePlayerProfilesEnabled,
+			boolean specificServerProfilesEnabled,
+			long identityContextRevision
+	) {
 	}
 
 	private static ProfileSettings readSettings(JsonObject root, String key) {

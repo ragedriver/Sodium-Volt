@@ -1,6 +1,10 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.ragedriver.sodiumvolt.client.performance.AnimatedTextureThrottleEngine;
+import com.ragedriver.sodiumvolt.client.performance.AttHotPathGate;
+import net.caffeinemc.mods.sodium.api.texture.SpriteUtil;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
@@ -9,7 +13,6 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(value = RenderSectionManager.class, remap = false)
@@ -22,7 +25,7 @@ public abstract class RenderSectionManagerAttMixin {
 		AnimatedTextureThrottleEngine.beginVisibilityScan(this.cameraPosition);
 	}
 
-	@Redirect(
+	@WrapOperation(
 			method = "tickVisibleRenders()V",
 			require = 1,
 			at = @At(
@@ -32,16 +35,41 @@ public abstract class RenderSectionManagerAttMixin {
 	)
 	private TextureAtlasSprite[] sodiumVolt$captureAnimatedSpriteDistance(
 			RenderRegion region,
-			int sectionIndex
+			int sectionIndex,
+			Operation<TextureAtlasSprite[]> original
 	) {
-		TextureAtlasSprite[] sprites = region.getAnimatedSprites(sectionIndex);
-		AnimatedTextureThrottleEngine.recordVisibleSection(
-				region,
-				sectionIndex,
-				sprites,
-				this.cameraPosition
-		);
+		TextureAtlasSprite[] sprites = original.call(region, sectionIndex);
+		if (AttHotPathGate.visibilityScanActive()) {
+			AnimatedTextureThrottleEngine.prepareVisibleSection(
+					region,
+					sectionIndex,
+					sprites,
+					this.cameraPosition
+			);
+		}
 		return sprites;
+	}
+
+	@WrapOperation(
+			method = "tickVisibleRenders()V",
+			require = 1,
+			at = @At(
+					value = "INVOKE",
+					target = "Lnet/caffeinemc/mods/sodium/api/texture/SpriteUtil;markSpriteActive(Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;)V"
+			)
+	)
+	private void sodiumVolt$recordAnimatedSpriteVisibility(
+			SpriteUtil spriteUtil,
+			TextureAtlasSprite sprite,
+			Operation<Void> original
+	) {
+		try {
+			if (AttHotPathGate.visibilityScanActive()) {
+				AnimatedTextureThrottleEngine.recordVisibleSprite(sprite);
+			}
+		} finally {
+			original.call(spriteUtil, sprite);
+		}
 	}
 
 	@Inject(method = "tickVisibleRenders()V", at = @At("RETURN"))

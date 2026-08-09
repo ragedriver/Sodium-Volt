@@ -15,6 +15,7 @@ public final class PrivacyScreenshotLogicTest {
 	public static void main(String[] arguments) throws Exception {
 		testCaptureStateMachine();
 		testFinallyCleanupAndResetGeneration();
+		testDisabledFastGateAndPendingTransitions();
 		testFilenameSafetyAndBounds();
 		PrivacyScreenshotConfigTestSupport.run();
 		System.out.println("Privacy Screenshot Mode logic tests passed");
@@ -54,6 +55,27 @@ public final class PrivacyScreenshotLogicTest {
 		stale.close();
 		check(state.state() == PrivacyCaptureStateMachine.State.PENDING,
 				"stale scope cannot clear a newer generation");
+	}
+
+	private static void testDisabledFastGateAndPendingTransitions() {
+		PrivacyCaptureFastGate.clear();
+		for (int frame = 0; frame < 10_000; frame++) {
+			check(!PrivacyCaptureFastGate.hasPendingCapture()
+						&& !PrivacyCaptureFastGate.isCaptureActive(),
+					"ordinary rendering performs only dormant primitive reads");
+		}
+		PrivacyCaptureFastGate.markPending();
+		check(PrivacyCaptureFastGate.hasPendingCapture()
+					&& !PrivacyCaptureFastGate.isCaptureActive(),
+				"accepted F2 request schedules one privacy frame");
+		PrivacyCaptureFastGate.beginCapture();
+		check(!PrivacyCaptureFastGate.hasPendingCapture()
+					&& PrivacyCaptureFastGate.isCaptureActive(),
+				"pending transition publishes active policy scope");
+		PrivacyCaptureFastGate.clear();
+		check(!PrivacyCaptureFastGate.hasPendingCapture()
+					&& !PrivacyCaptureFastGate.isCaptureActive(),
+				"disable or disconnect clears pending and active state together");
 	}
 
 	private static void testFilenameSafetyAndBounds() throws Exception {

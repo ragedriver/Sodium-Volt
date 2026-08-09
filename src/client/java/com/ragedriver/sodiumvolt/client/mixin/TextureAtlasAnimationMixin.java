@@ -62,9 +62,8 @@ public abstract class TextureAtlasAnimationMixin {
 			return;
 		}
 
-		AnimatedTextureThrottleEngine.beginAtlasCycle();
 		TextureAtlas atlas = (TextureAtlas) (Object) this;
-		boolean installed = AttAnimationCycleContext.push(
+		boolean installed = AnimatedTextureThrottleEngine.beginAtlasCycle(
 				atlas.location(),
 				this.sodiumVolt$attWarmupCycles > 0
 		);

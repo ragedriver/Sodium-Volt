@@ -9,6 +9,7 @@ import java.util.Map;
 public final class BoundedLabelCounter {
 	private final int maximumLabels;
 	private final HashMap<String, MutableCount> counts;
+	private final MutableCount[] countPool;
 	private int total;
 	private int unclassified;
 
@@ -18,6 +19,7 @@ public final class BoundedLabelCounter {
 		}
 		this.maximumLabels = maximumLabels;
 		this.counts = new HashMap<>(maximumLabels);
+		this.countPool = new MutableCount[maximumLabels];
 	}
 
 	public void add(String label) {
@@ -26,7 +28,15 @@ public final class BoundedLabelCounter {
 		if (count != null) {
 			count.value = saturatingIncrement(count.value);
 		} else if (this.counts.size() < this.maximumLabels) {
-			this.counts.put(label, new MutableCount());
+			int poolIndex = this.counts.size();
+			MutableCount pooled = this.countPool[poolIndex];
+			if (pooled == null) {
+				pooled = new MutableCount();
+				this.countPool[poolIndex] = pooled;
+			} else {
+				pooled.value = 1;
+			}
+			this.counts.put(label, pooled);
 		} else {
 			this.unclassified = saturatingIncrement(this.unclassified);
 		}
@@ -54,6 +64,12 @@ public final class BoundedLabelCounter {
 
 	public int distinctLabels() {
 		return this.counts.size();
+	}
+
+	public void clear() {
+		this.counts.clear();
+		this.total = 0;
+		this.unclassified = 0;
 	}
 
 	private static int saturatingIncrement(int value) {

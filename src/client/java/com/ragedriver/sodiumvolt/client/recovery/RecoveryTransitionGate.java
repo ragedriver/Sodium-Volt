@@ -4,7 +4,7 @@ final class RecoveryTransitionGate {
 	private boolean masterStateObserved;
 	private boolean masterEnabled;
 	private boolean transitionBlocked;
-	private boolean clientStopping;
+	private volatile boolean clientStopping;
 
 	void observeMasterState(boolean enabled) {
 		if (this.clientStopping) {

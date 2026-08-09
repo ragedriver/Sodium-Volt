@@ -5,6 +5,8 @@ import com.ragedriver.sodiumvolt.client.profile.PerformanceProfileEngine;
 import com.ragedriver.sodiumvolt.client.profile.ProfileParticleMode;
 import com.ragedriver.sodiumvolt.client.profile.ProfileSettings;
 import com.ragedriver.sodiumvolt.client.profile.VoltFactoryReset;
+import com.ragedriver.sodiumvolt.client.performance.VoltTunerProfile;
+import com.ragedriver.sodiumvolt.client.performance.VoltTunerProfileController;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
 import net.caffeinemc.mods.sodium.api.config.ConfigState;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
@@ -53,6 +55,7 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 	private static final Identifier FRAME_SAMPLE_WINDOW = optionId("frame_sample_window");
 	private static final Identifier SPIKE_THRESHOLD = optionId("spike_threshold");
 	private static final Identifier APC_ENABLED = optionId("apc_enabled");
+	private static final Identifier VOLT_TUNER_PROFILE = optionId("volt_tuner_profile");
 	private static final Identifier APC_PROFILE = optionId("apc_profile");
 	private static final Identifier APC_TARGET_FPS = optionId("apc_target_fps");
 	private static final Identifier APC_RENDER_DISTANCE = optionId("apc_render_distance");
@@ -280,6 +283,8 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 	private static final StorageEventHandler SMART_FPS_STORAGE_HANDLER = SMART_FPS_CONFIG::save;
 	private static final VoltRecoveryConfig RECOVERY_CONFIG = VoltRecoveryConfig.getInstance();
 	private static final StorageEventHandler RECOVERY_STORAGE_HANDLER = RECOVERY_CONFIG::save;
+	private static final StorageEventHandler TUNER_PROFILE_STORAGE_HANDLER =
+			SodiumVoltConfigEntryPoint::saveTunerProfileChanges;
 	private static final GpuWatchdogConfig WATCHDOG_CONFIG = GpuWatchdogConfig.getInstance();
 	private static final StorageEventHandler WATCHDOG_STORAGE_HANDLER = WATCHDOG_CONFIG::save;
 	private static final ResourcePackShieldConfig SHIELD_CONFIG =
@@ -661,6 +666,47 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 										))))
 				.addPage(builder.createOptionPage()
 						.setName(Component.translatable("sodium-volt.options.performance.page"))
+						.addOptionGroup(builder.createOptionGroup()
+								.setName(Component.translatable("sodium-volt.options.performance.tuner.group"))
+								.addOption(builder.createEnumOption(
+										VOLT_TUNER_PROFILE,
+										VoltTunerProfile.class
+								)
+										.setName(Component.translatable(
+												"sodium-volt.options.performance.tuner.profile"
+										))
+										.setTooltip(profile -> switch (profile) {
+											case VOLT_DEFAULT -> Component.translatable(
+													"sodium-volt.options.performance.tuner.volt_default.tooltip"
+											);
+											case COMPETITIVE -> Component.translatable(
+													"sodium-volt.options.performance.tuner.competitive.tooltip"
+											);
+											case AGGRESSIVE -> Component.translatable(
+													"sodium-volt.options.performance.tuner.aggressive.tooltip"
+											);
+										})
+										.setImpact(OptionImpact.VARIES)
+										.setDefaultValue(VoltTunerProfile.VOLT_DEFAULT)
+										.setElementNameProvider(profile -> switch (profile) {
+											case VOLT_DEFAULT -> Component.translatable(
+													"sodium-volt.options.performance.tuner.volt_default"
+											);
+											case COMPETITIVE -> Component.translatable(
+													"sodium-volt.options.performance.tuner.competitive"
+											);
+											case AGGRESSIVE -> Component.translatable(
+													"sodium-volt.options.performance.tuner.aggressive"
+											);
+										})
+										.setStorageHandler(TUNER_PROFILE_STORAGE_HANDLER)
+										.setBinding(
+												profile -> VoltTunerProfileController.select(
+														profile, PERFORMANCE_CONFIG, RECOVERY_CONFIG, CONFIG,
+														SMART_FPS_CONFIG, INSPECTOR_CONFIG
+												),
+												PERFORMANCE_CONFIG::getTunerProfile
+										)))
 						.addOptionGroup(builder.createOptionGroup()
 								.setName(Component.translatable("sodium-volt.options.performance.group"))
 								.addOption(builder.createBooleanOption(APC_ENABLED)
@@ -3897,6 +3943,16 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 						state -> state.readBooleanOption(APC_ENABLED),
 						APC_ENABLED
 				);
+	}
+
+	private static void saveTunerProfileChanges() {
+		// Each config save uses atomic replacement. Keep these independent calls so
+		// a failure writing one file never skips persistence of another changed one.
+		PERFORMANCE_CONFIG.save();
+		RECOVERY_CONFIG.save();
+		CONFIG.save();
+		SMART_FPS_CONFIG.save();
+		INSPECTOR_CONFIG.save();
 	}
 
 	private static Identifier optionId(String path) {

@@ -1,6 +1,7 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.performance.VisibilityAwareParticleScheduler;
+import com.ragedriver.sodiumvolt.client.performance.VapsHotPathGate;
 import net.minecraft.client.particle.Particle;
 import net.minecraft.client.particle.ParticleGroup;
 import org.spongepowered.asm.mixin.Mixin;
@@ -14,6 +15,10 @@ public abstract class ParticleGroupTickMixin {
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/client/particle/Particle;tick()V")
 	)
 	private void sodiumVolt$scheduleParticleTick(Particle particle) {
-		VisibilityAwareParticleScheduler.tickParticle(particle);
+		if (VapsHotPathGate.simulationActive()) {
+			VisibilityAwareParticleScheduler.tickParticle(particle);
+		} else {
+			particle.tick();
+		}
 	}
 }

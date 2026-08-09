@@ -2,6 +2,7 @@ package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.performance.AdaptivePerformanceController;
 import com.ragedriver.sodiumvolt.client.performance.VramPressureProtectionEngine;
+import com.ragedriver.sodiumvolt.client.inspector.VoltInspectorEngine;
 import com.ragedriver.sodiumvolt.client.recovery.VoltRecoveryEngine;
 import com.ragedriver.sodiumvolt.client.watchdog.GpuTimeoutWatchdogEngine;
 import net.minecraft.client.Minecraft;
@@ -17,10 +18,13 @@ public abstract class MinecraftRenderMixin {
 			boolean renderLevel,
 			CallbackInfo callbackInfo
 	) {
-		GpuTimeoutWatchdogEngine.onRenderFrameBegin(
-				(Minecraft) (Object) this,
-				System.nanoTime()
-		);
+		VoltInspectorEngine.publishStatisticsDemand((Minecraft) (Object) this);
+		if (GpuTimeoutWatchdogEngine.requiresRenderFrameBeginTimestamp()) {
+			GpuTimeoutWatchdogEngine.onRenderFrameBegin(
+					(Minecraft) (Object) this,
+					System.nanoTime()
+			);
+		}
 	}
 
 	@Inject(method = "renderFrame(Z)V", at = @At("TAIL"))
@@ -28,15 +32,26 @@ public abstract class MinecraftRenderMixin {
 			boolean renderLevel,
 			CallbackInfo callbackInfo
 	) {
-		GpuTimeoutWatchdogEngine.onRenderFrameEnd(
-				(Minecraft) (Object) this,
-				System.nanoTime()
-		);
-		VoltRecoveryEngine.onRenderFrame((Minecraft) (Object) this, System.nanoTime());
-		AdaptivePerformanceController.onRenderFrame((Minecraft) (Object) this, System.nanoTime());
-		VramPressureProtectionEngine.onRenderFrame(
-				(Minecraft) (Object) this,
-				System.nanoTime()
-		);
+		boolean watchdog = GpuTimeoutWatchdogEngine.requiresRenderFrameEndTimestamp();
+		boolean recovery = VoltRecoveryEngine.requiresRenderFrameTimestamp();
+		boolean adaptive = AdaptivePerformanceController.requiresRenderFrameTimestamp();
+		boolean vram = VramPressureProtectionEngine.requiresRenderFrameTimestamp();
+		if (!watchdog && !recovery && !adaptive && !vram) {
+			return;
+		}
+		Minecraft minecraft = (Minecraft) (Object) this;
+		long nowNanos = System.nanoTime();
+		if (watchdog) {
+			GpuTimeoutWatchdogEngine.onRenderFrameEnd(minecraft, nowNanos);
+		}
+		if (recovery) {
+			VoltRecoveryEngine.onRenderFrame(minecraft, nowNanos);
+		}
+		if (adaptive) {
+			AdaptivePerformanceController.onRenderFrame(minecraft, nowNanos);
+		}
+		if (vram) {
+			VramPressureProtectionEngine.onRenderFrame(minecraft, nowNanos);
+		}
 	}
 }

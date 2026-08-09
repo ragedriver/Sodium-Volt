@@ -61,5 +61,6 @@ public abstract class ParticleEngineMixin {
 	@Inject(method = "setLevel", at = @At("HEAD"))
 	private void sodiumVolt$resetParticleScheduler(ClientLevel level, CallbackInfo callbackInfo) {
 		VisibilityAwareParticleScheduler.onLevelChanged();
+		VoltGuardEngine.onLevelChanged();
 	}
 }

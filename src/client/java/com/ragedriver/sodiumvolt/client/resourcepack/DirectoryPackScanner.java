@@ -45,12 +45,12 @@ public final class DirectoryPackScanner {
 			ShieldOverlayPlan overlays,
 			long deadline
 	) throws IOException {
-		if (Files.isSymbolicLink(suppliedRoot)) {
-			return failed(ShieldReason.SYMLINK, 0, 0L, 0L);
-		}
 		BasicFileAttributes rootAttributes = Files.readAttributes(
 				suppliedRoot, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS
 		);
+		if (rootAttributes.isSymbolicLink()) {
+			return failed(ShieldReason.SYMLINK, 0, 0L, 0L);
+		}
 		if (!rootAttributes.isDirectory()) {
 			return failed(ShieldReason.SPECIAL_FILE, 0, 0L, 0L);
 		}
@@ -70,12 +70,12 @@ public final class DirectoryPackScanner {
 				return failed(ShieldReason.SCAN_TIME, entries, total, inspected);
 			}
 			Path directory = directories.pop();
-			if (Files.isSymbolicLink(directory)) {
-				return failed(ShieldReason.SYMLINK, entries, total, inspected);
-			}
 			BasicFileAttributes directoryAttributes = Files.readAttributes(
 					directory, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS
 			);
+			if (directoryAttributes.isSymbolicLink()) {
+				return failed(ShieldReason.SYMLINK, entries, total, inspected);
+			}
 			if (!directoryAttributes.isDirectory()) {
 				return failed(ShieldReason.SPECIAL_FILE, entries, total, inspected);
 			}
@@ -104,12 +104,12 @@ public final class DirectoryPackScanner {
 							)) {
 						return failed(ShieldReason.UNSAFE_PATH, entries, total, inspected);
 					}
-					if (Files.isSymbolicLink(child)) {
-						return failed(ShieldReason.SYMLINK, entries, total, inspected);
-					}
 					BasicFileAttributes attributes = Files.readAttributes(
 							child, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS
 					);
+					if (attributes.isSymbolicLink()) {
+						return failed(ShieldReason.SYMLINK, entries, total, inspected);
+					}
 					if (attributes.isDirectory()) {
 						directories.push(child);
 						continue;
@@ -149,7 +149,10 @@ public final class DirectoryPackScanner {
 								return failed(reason, entries, total, inspected);
 							}
 						}
-					} else if (lower.endsWith(".json") || lower.endsWith(".mcmeta")) {
+					} else if (physicalPath.equals("pack.mcmeta")) {
+						// Root metadata is a bootstrap exception: repository discovery may parse it
+						// before the wrapped live resource path exists. It is intentionally checked
+						// again by ShieldedInputStream because file identity can change after scan.
 						try (InputStream input = openNoFollow(child)) {
 							ShieldReason reason = ShieldContentValidators.validateJson(
 									input,
@@ -186,9 +189,6 @@ public final class DirectoryPackScanner {
 			boolean missing = false;
 			for (Path component : root.relativize(candidate)) {
 				cursor = cursor.resolve(component);
-				if (Files.isSymbolicLink(cursor)) {
-					return ShieldReason.SYMLINK;
-				}
 				BasicFileAttributes attributes;
 				try {
 					attributes = Files.readAttributes(
@@ -199,6 +199,9 @@ public final class DirectoryPackScanner {
 				} catch (NoSuchFileException exception) {
 					missing = true;
 					break;
+				}
+				if (attributes.isSymbolicLink()) {
+					return ShieldReason.SYMLINK;
 				}
 				if (!attributes.isDirectory()) {
 					return ShieldReason.SPECIAL_FILE;

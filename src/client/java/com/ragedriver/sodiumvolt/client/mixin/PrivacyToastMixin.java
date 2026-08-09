@@ -1,6 +1,7 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.ragedriver.sodiumvolt.client.privacy.PrivacyScreenshotEngine;
+import com.ragedriver.sodiumvolt.client.privacy.PrivacyCaptureFastGate;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.toasts.ToastManager;
 import org.spongepowered.asm.mixin.Mixin;
@@ -15,7 +16,8 @@ public abstract class PrivacyToastMixin {
 			GuiGraphicsExtractor graphics,
 			CallbackInfo callbackInfo
 	) {
-		if (PrivacyScreenshotEngine.hidesToastsAndSavingIndicator()) {
+		if (PrivacyCaptureFastGate.isCaptureActive()
+				&& PrivacyScreenshotEngine.hidesToastsAndSavingIndicator()) {
 			callbackInfo.cancel();
 		}
 	}

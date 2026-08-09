@@ -5,7 +5,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.ragedriver.sodiumvolt.client.inspector.VoltInspectorEngine;
 import com.ragedriver.sodiumvolt.client.performance.BlockEntityRenderBudgetEngine;
 import com.ragedriver.sodiumvolt.client.resourcepack.ResourcePackShieldEngine;
-import com.ragedriver.sodiumvolt.client.resourcepack.ShieldReloadContextStack;
+import com.ragedriver.sodiumvolt.client.resourcepack.ShieldReloadGate;
 import com.ragedriver.sodiumvolt.client.watchdog.GpuTimeoutWatchdogEngine;
 import net.minecraft.client.GameLoadCookie;
 import net.minecraft.client.Minecraft;
@@ -15,8 +15,6 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
 
-import java.util.ArrayDeque;
-import java.util.Deque;
 import java.util.concurrent.CompletableFuture;
 
 @Mixin(Minecraft.class)
@@ -24,16 +22,19 @@ public abstract class MinecraftResourceReloadMixin {
 	@Unique
 	private static final int SODIUM_VOLT_MAX_RELOAD_NESTING = 32;
 	@Unique
-	private Deque<VoltInspectorEngine.ReloadObservation> sodiumVolt$reloadObservations;
-	@Unique
-	private Deque<GpuTimeoutWatchdogEngine.ReloadToken> sodiumVolt$watchdogReloadTokens;
-	@Unique
-	private Deque<ResourcePackShieldEngine.ReloadToken> sodiumVolt$shieldReloadTokens;
-	@Unique
-	private ShieldReloadContextStack<ResourcePackShieldEngine.ReloadToken>
-			sodiumVolt$privateShieldContexts;
+	private int sodiumVolt$publicReloadDepth;
 	@Unique
 	private int sodiumVolt$reloadOverflowDepth;
+	@Unique
+	private ResourcePackShieldEngine.ReloadToken sodiumVolt$currentPublicShieldToken;
+	@Unique
+	private boolean sodiumVolt$publicShieldTokenAvailable;
+	@Unique
+	private int sodiumVolt$privateReloadDepth;
+	@Unique
+	private int sodiumVolt$privateReloadOverflowDepth;
+	@Unique
+	private ResourcePackShieldEngine.ReloadToken sodiumVolt$currentPrivateShieldToken;
 
 	@WrapMethod(
 			method = "reloadResourcePacks()Ljava/util/concurrent/CompletableFuture;"
@@ -42,8 +43,8 @@ public abstract class MinecraftResourceReloadMixin {
 			Operation<CompletableFuture<Void>> original
 	) {
 		BlockEntityRenderBudgetEngine.onResourceReload();
-		sodiumVolt$ensureReloadState();
-		if (this.sodiumVolt$reloadObservations.size() >= SODIUM_VOLT_MAX_RELOAD_NESTING) {
+		if (this.sodiumVolt$reloadOverflowDepth > 0
+				|| this.sodiumVolt$publicReloadDepth >= SODIUM_VOLT_MAX_RELOAD_NESTING) {
 			this.sodiumVolt$reloadOverflowDepth++;
 			try {
 				return original.call();
@@ -51,36 +52,35 @@ public abstract class MinecraftResourceReloadMixin {
 				this.sodiumVolt$reloadOverflowDepth--;
 			}
 		}
-		VoltInspectorEngine.ReloadObservation observation =
-				VoltInspectorEngine.beginResourceReload();
-		GpuTimeoutWatchdogEngine.ReloadToken watchdogToken =
-				GpuTimeoutWatchdogEngine.beginResourceReload();
+		this.sodiumVolt$publicReloadDepth++;
+		VoltInspectorEngine.ReloadObservation observation = null;
+		GpuTimeoutWatchdogEngine.ReloadToken watchdogToken = null;
 		ResourcePackShieldEngine.ReloadToken shieldToken =
-				ResourcePackShieldEngine.beginResourceReload();
-		this.sodiumVolt$reloadObservations.push(observation);
-		this.sodiumVolt$watchdogReloadTokens.push(watchdogToken);
-		this.sodiumVolt$shieldReloadTokens.push(shieldToken);
+				ResourcePackShieldEngine.ReloadToken.DISABLED;
+		ResourcePackShieldEngine.ReloadToken previousShieldToken =
+				this.sodiumVolt$currentPublicShieldToken;
+		boolean previousShieldTokenAvailable = this.sodiumVolt$publicShieldTokenAvailable;
 
 		CompletableFuture<Void> future = null;
 		try {
+			observation = VoltInspectorEngine.beginResourceReload();
+			watchdogToken = GpuTimeoutWatchdogEngine.beginResourceReload();
+			shieldToken = ResourcePackShieldEngine.beginResourceReload();
+			this.sodiumVolt$currentPublicShieldToken = shieldToken;
+			this.sodiumVolt$publicShieldTokenAvailable = true;
 			future = original.call();
 			return future;
 		} finally {
-			if (!this.sodiumVolt$reloadObservations.isEmpty()
-					&& this.sodiumVolt$reloadObservations.peek() == observation) {
-				this.sodiumVolt$reloadObservations.pop();
+			try {
+				VoltInspectorEngine.watchResourceReload(future, observation);
+				GpuTimeoutWatchdogEngine.watchResourceReload(future, watchdogToken);
+				ResourcePackShieldEngine.watchResourceReload(future, shieldToken);
+			} finally {
+				this.sodiumVolt$currentPublicShieldToken = previousShieldToken;
+				this.sodiumVolt$publicShieldTokenAvailable =
+						previousShieldTokenAvailable;
+				this.sodiumVolt$publicReloadDepth--;
 			}
-			VoltInspectorEngine.watchResourceReload(future, observation);
-			if (!this.sodiumVolt$watchdogReloadTokens.isEmpty()
-					&& this.sodiumVolt$watchdogReloadTokens.peek() == watchdogToken) {
-				this.sodiumVolt$watchdogReloadTokens.pop();
-			}
-			GpuTimeoutWatchdogEngine.watchResourceReload(future, watchdogToken);
-			if (!this.sodiumVolt$shieldReloadTokens.isEmpty()
-					&& this.sodiumVolt$shieldReloadTokens.peek() == shieldToken) {
-				this.sodiumVolt$shieldReloadTokens.pop();
-			}
-			ResourcePackShieldEngine.watchResourceReload(future, shieldToken);
 		}
 	}
 
@@ -93,36 +93,64 @@ public abstract class MinecraftResourceReloadMixin {
 			GameLoadCookie cookie,
 			Operation<CompletableFuture<Void>> original
 	) {
-		sodiumVolt$ensureReloadState();
-		ShieldReloadContextStack.Frame<ResourcePackShieldEngine.ReloadToken> frame =
-				this.sodiumVolt$privateShieldContexts.begin(
-						this.sodiumVolt$shieldReloadTokens.peek(),
-						!this.sodiumVolt$shieldReloadTokens.isEmpty(),
-						this.sodiumVolt$reloadOverflowDepth > 0,
-						ResourcePackShieldEngine::beginResourceReload,
-						ResourcePackShieldEngine.ReloadToken.DISABLED
-				);
-		ResourcePackShieldEngine.ReloadToken token = frame == null
-				? ResourcePackShieldEngine.ReloadToken.DISABLED
-				: frame.token();
-		if (frame != null && frame.ownsToken()) {
-			this.sodiumVolt$shieldReloadTokens.push(frame.token());
+		if (this.sodiumVolt$privateReloadOverflowDepth > 0
+				|| this.sodiumVolt$privateReloadDepth >= SODIUM_VOLT_MAX_RELOAD_NESTING) {
+			this.sodiumVolt$privateReloadOverflowDepth++;
+			ResourcePackShieldEngine.ReloadToken previous =
+					this.sodiumVolt$currentPrivateShieldToken;
+			this.sodiumVolt$currentPrivateShieldToken =
+					ResourcePackShieldEngine.ReloadToken.DISABLED;
+			ResourcePackShieldEngine.enterSynchronousReload(
+					ResourcePackShieldEngine.ReloadToken.DISABLED
+			);
+			try {
+				return original.call(recovery, cookie);
+			} finally {
+				try {
+					ResourcePackShieldEngine.exitSynchronousReload();
+				} finally {
+					this.sodiumVolt$currentPrivateShieldToken = previous;
+					this.sodiumVolt$privateReloadOverflowDepth--;
+				}
+			}
 		}
-		ResourcePackShieldEngine.enterSynchronousReload(token);
+		this.sodiumVolt$privateReloadDepth++;
+		ResourcePackShieldEngine.ReloadToken previous =
+				this.sodiumVolt$currentPrivateShieldToken;
+		ShieldReloadGate.PrivateTokenSource tokenSource =
+				ShieldReloadGate.privateTokenSource(
+						this.sodiumVolt$privateReloadDepth,
+						this.sodiumVolt$reloadOverflowDepth,
+						this.sodiumVolt$publicShieldTokenAvailable
+				);
+		boolean ownsToken = tokenSource.ownsToken();
+		ResourcePackShieldEngine.ReloadToken token =
+				ResourcePackShieldEngine.ReloadToken.DISABLED;
+		boolean contextEntered = false;
 		CompletableFuture<Void> future = null;
 		try {
+			token = switch (tokenSource) {
+				case DISABLED -> ResourcePackShieldEngine.ReloadToken.DISABLED;
+				case PUBLIC -> this.sodiumVolt$currentPublicShieldToken;
+				case PRIVATE -> previous;
+				case OWNED -> ResourcePackShieldEngine.beginResourceReload();
+			};
+			this.sodiumVolt$currentPrivateShieldToken = token;
+			ResourcePackShieldEngine.enterSynchronousReload(token);
+			contextEntered = true;
 			future = original.call(recovery, cookie);
 			return future;
 		} finally {
-			ResourcePackShieldEngine.exitSynchronousReload();
-			ShieldReloadContextStack.Frame<ResourcePackShieldEngine.ReloadToken> completed =
-					this.sodiumVolt$privateShieldContexts.finish();
-			if (completed != null && completed.ownsToken()) {
-				if (!this.sodiumVolt$shieldReloadTokens.isEmpty()
-						&& this.sodiumVolt$shieldReloadTokens.peek() == completed.token()) {
-					this.sodiumVolt$shieldReloadTokens.pop();
+			try {
+				if (contextEntered) {
+					ResourcePackShieldEngine.exitSynchronousReload();
 				}
-				ResourcePackShieldEngine.watchResourceReload(future, completed.token());
+			} finally {
+				this.sodiumVolt$currentPrivateShieldToken = previous;
+				this.sodiumVolt$privateReloadDepth--;
+				if (ownsToken) {
+					ResourcePackShieldEngine.watchResourceReload(future, token);
+				}
 			}
 		}
 	}
@@ -145,29 +173,7 @@ public abstract class MinecraftResourceReloadMixin {
 			CompletableFuture<Unit> initialTask
 	) {
 		ResourcePackShieldEngine.ReloadToken token =
-				this.sodiumVolt$privateShieldContexts == null
-								|| this.sodiumVolt$privateShieldContexts.isEmpty()
-						? null
-						: this.sodiumVolt$privateShieldContexts.currentOr(
-								ResourcePackShieldEngine.ReloadToken.DISABLED
-						);
+				this.sodiumVolt$currentPrivateShieldToken;
 		return ResourcePackShieldEngine.guardInitialReloadTask(initialTask, token);
-	}
-
-	@Unique
-	private void sodiumVolt$ensureReloadState() {
-		if (this.sodiumVolt$reloadObservations == null) {
-			this.sodiumVolt$reloadObservations = new ArrayDeque<>(4);
-		}
-		if (this.sodiumVolt$watchdogReloadTokens == null) {
-			this.sodiumVolt$watchdogReloadTokens = new ArrayDeque<>(4);
-		}
-		if (this.sodiumVolt$shieldReloadTokens == null) {
-			this.sodiumVolt$shieldReloadTokens = new ArrayDeque<>(4);
-		}
-		if (this.sodiumVolt$privateShieldContexts == null) {
-			this.sodiumVolt$privateShieldContexts =
-					new ShieldReloadContextStack<>(SODIUM_VOLT_MAX_RELOAD_NESTING);
-		}
 	}
 }

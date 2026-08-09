@@ -57,6 +57,7 @@ public final class VoltInspectorConfig {
 	private volatile int refreshIntervalMs = REFRESH_INTERVAL_DEFAULT;
 	private volatile int frameSampleWindow = SAMPLE_WINDOW_DEFAULT;
 	private volatile int spikeThresholdMs = SPIKE_THRESHOLD_DEFAULT;
+	private transient volatile boolean samplingRequested;
 
 	private VoltInspectorConfig() {
 	}
@@ -75,6 +76,7 @@ public final class VoltInspectorConfig {
 
 	public void setVoltInspectorEnabled(boolean value) {
 		this.voltInspectorEnabled = value;
+		refreshSamplingRequested();
 	}
 
 	public boolean isShowInspectorOverlay() {
@@ -83,6 +85,11 @@ public final class VoltInspectorConfig {
 
 	public void setShowInspectorOverlay(boolean value) {
 		this.showInspectorOverlay = value;
+		refreshSamplingRequested();
+	}
+
+	public boolean isSamplingRequested() {
+		return this.samplingRequested;
 	}
 
 	public boolean isFrameTimeStatistics() {
@@ -206,6 +213,7 @@ public final class VoltInspectorConfig {
 
 	public synchronized void resetToFactoryDefaults() {
 		ConfigFactoryDefaults.copyMutableFields(this, new VoltInspectorConfig());
+		refreshSamplingRequested();
 	}
 
 	public synchronized void save() {
@@ -285,6 +293,7 @@ public final class VoltInspectorConfig {
 				config.spikeThresholdMs = readInteger(root, "spike_threshold_ms", config.spikeThresholdMs);
 			}
 			config.validate();
+			config.refreshSamplingRequested();
 			return config;
 		} catch (IOException | RuntimeException | StackOverflowError exception) {
 			SodiumVolt.LOGGER.error(
@@ -322,6 +331,10 @@ public final class VoltInspectorConfig {
 		this.setRefreshIntervalMs(this.refreshIntervalMs);
 		this.setFrameSampleWindow(this.frameSampleWindow);
 		this.setSpikeThresholdMs(this.spikeThresholdMs);
+	}
+
+	private void refreshSamplingRequested() {
+		this.samplingRequested = this.voltInspectorEnabled && this.showInspectorOverlay;
 	}
 
 	private static int clampToStep(int value, int minimum, int maximum, int step) {
