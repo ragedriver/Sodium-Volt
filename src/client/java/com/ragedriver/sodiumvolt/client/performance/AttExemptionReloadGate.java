@@ -8,13 +8,19 @@ final class AttExemptionReloadGate {
 	private long requestedGeneration = 1L;
 	private long loadedGeneration;
 	private long inFlightGeneration;
+	private boolean honorExemptionLists = true;
 
-	synchronized long onResourceReload(boolean enabled) {
+	synchronized long onResourceReload(boolean enabled, boolean honorExemptionLists) {
+		this.honorExemptionLists = honorExemptionLists;
 		this.requestedGeneration = nextGeneration(this.requestedGeneration);
 		return enabled ? claimLatest() : 0L;
 	}
 
-	synchronized long onEnabledTick() {
+	synchronized long onEnabledTick(boolean honorExemptionLists) {
+		if (this.honorExemptionLists != honorExemptionLists) {
+			this.honorExemptionLists = honorExemptionLists;
+			this.requestedGeneration = nextGeneration(this.requestedGeneration);
+		}
 		return claimLatest();
 	}
 

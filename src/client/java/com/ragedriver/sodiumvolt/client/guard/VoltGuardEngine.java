@@ -31,7 +31,6 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -166,7 +165,8 @@ public final class VoltGuardEngine {
 		selection.begin(frame.particleBudget, frame.prioritizeNearby, frame.preserveCritical);
 		for (int index = 0; index < eligibilityHandoff.candidateCount(); index++) {
 			Particle particle = eligibilityHandoff.candidateAt(index);
-			double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+			double distanceSquared = selection.requiresRanking()
+					? particleDistanceSquared(particle, cameraPosition) : 0.0D;
 			selection.offer(
 					particle,
 					eligibilityHandoff.isSpecial(index),
@@ -181,7 +181,8 @@ public final class VoltGuardEngine {
 			// exact identity semantics; normal handoffs remain one candidate pass.
 			for (int index = 0; index < eligibilityHandoff.candidateCount(); index++) {
 				Particle particle = eligibilityHandoff.candidateAt(index);
-				double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+				double distanceSquared = selection.requiresRanking()
+					? particleDistanceSquared(particle, cameraPosition) : 0.0D;
 				selection.offerReplay(
 						particle,
 						frame.preserveCritical
@@ -223,80 +224,52 @@ public final class VoltGuardEngine {
 			return;
 		}
 
-		int visibleQuadCount = 0;
-		for (Particle particle : quadParticles) {
-			if (particle instanceof SingleQuadParticle
-					&& isVisible(particle, frustum)
-					&& VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				visibleQuadCount++;
-			}
-		}
-		int specialCount = 0;
-		for (Particle particle : itemPickupParticles) {
-			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				specialCount = saturatingAdd(specialCount, 1);
-			}
-		}
-		for (Particle particle : elderGuardianParticles) {
-			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				specialCount = saturatingAdd(specialCount, 1);
-			}
-		}
-		int eligibleCount = saturatingAdd(visibleQuadCount, specialCount);
-		if (GuardWorkloadBounds.eligibleParticlesFitBudget(eligibleCount, frame.particleBudget)) {
-			frame.particleSelection.abort();
-			frame.selectedParticles.clear();
-			frame.allParticlesSelected = true;
-			frame.suppressedParticles = 0;
-			return;
-		}
-
 		Set<Particle> selected = frame.selectedParticles;
 		SpillAwareParticleSelector<Particle> selection = frame.particleSelection;
 		selection.begin(frame.particleBudget, frame.prioritizeNearby, frame.preserveCritical);
+		ParticleSelectionPrefix<Particle> prefix = frame.particlePrefix;
+		prefix.begin(frame.particleBudget);
+		ParticleSelectionPrefix.CandidateConsumer<Particle> offer = (particle, special, index) ->
+				offerFusedParticle(frame, selection, particle, special, cameraPosition, index);
+		int eligibleCount = 0;
+		int specialCount = 0;
 		int originalIndex = 0;
 		for (Particle particle : quadParticles) {
 			if (particle instanceof SingleQuadParticle
 					&& isVisible(particle, frustum)
 					&& VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				offerFusedParticle(
-						frame,
-						selection,
-						particle,
-						false,
-						cameraPosition,
-						originalIndex
-				);
+				eligibleCount = saturatingAdd(eligibleCount, 1);
+				prefix.offer(particle, false, originalIndex, offer);
 			}
 			originalIndex++;
 		}
 		for (Particle particle : itemPickupParticles) {
 			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				offerFusedParticle(
-						frame,
-						selection,
-						particle,
-						true,
-						cameraPosition,
-						originalIndex
-				);
+				specialCount = saturatingAdd(specialCount, 1);
+				eligibleCount = saturatingAdd(eligibleCount, 1);
+				prefix.offer(particle, true, originalIndex, offer);
 			}
 			originalIndex++;
 		}
 		for (Particle particle : elderGuardianParticles) {
 			if (VisibilityAwareParticleScheduler.shouldRenderParticle(particle)) {
-				offerFusedParticle(
-						frame,
-						selection,
-						particle,
-						true,
-						cameraPosition,
-						originalIndex
-				);
+				specialCount = saturatingAdd(specialCount, 1);
+				eligibleCount = saturatingAdd(eligibleCount, 1);
+				prefix.offer(particle, true, originalIndex, offer);
 			}
 			originalIndex++;
 		}
+		prefix.clear();
+		if (GuardWorkloadBounds.eligibleParticlesFitBudget(eligibleCount, frame.particleBudget)) {
+			selection.abort();
+			selected.clear();
+			frame.allParticlesSelected = true;
+			frame.suppressedParticles = 0;
+			return;
+		}
 		if (!selection.finishFromSpill(selected, specialCount)) {
+			// Only exceptional duplicate-identity input requires reevaluation;
+			// keep exact reserve semantics without an unbounded eligibility cache.
 			replayGeneralParticleSelection(
 					frame,
 					selection,
@@ -321,7 +294,8 @@ public final class VoltGuardEngine {
 			Vec3 cameraPosition,
 			int originalIndex
 	) {
-		double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+		double distanceSquared = selection.requiresRanking()
+				? particleDistanceSquared(particle, cameraPosition) : 0.0D;
 		selection.offer(
 				particle,
 				special,
@@ -373,7 +347,8 @@ public final class VoltGuardEngine {
 			Vec3 cameraPosition,
 			int originalIndex
 	) {
-		double distanceSquared = particleDistanceSquared(particle, cameraPosition);
+		double distanceSquared = selection.requiresRanking()
+				? particleDistanceSquared(particle, cameraPosition) : 0.0D;
 		selection.offerReplay(
 				particle,
 				frame.preserveCritical && distanceSquared <= CRITICAL_EFFECT_DISTANCE_SQUARED,
@@ -576,16 +551,9 @@ public final class VoltGuardEngine {
 			return 0;
 		}
 		if (!prioritizeNearby && !preserveCritical) {
-			int accepted = 0;
-			int removed = 0;
-			Iterator<EntityRenderState> iterator = states.iterator();
-			while (iterator.hasNext()) {
-				if (iterator.next() instanceof DisplayEntityRenderState && accepted++ >= budget) {
-					iterator.remove();
-					removed++;
-				}
-			}
-			return removed;
+			return DisplayEntityCompaction.limitFirst(
+					states, budget, state -> state instanceof DisplayEntityRenderState
+			);
 		}
 
 		Vec3 targetedPosition = preserveCritical && hitResult instanceof EntityHitResult
@@ -634,24 +602,9 @@ public final class VoltGuardEngine {
 		int selectedCount = selection.copyOriginalIndices(selectedIndices);
 		selection.clear();
 		Arrays.sort(selectedIndices, 0, selectedCount);
-		int selectedCursor = 0;
-		int rawIndex = 0;
-		int removed = 0;
-		Iterator<EntityRenderState> iterator = states.iterator();
-		while (iterator.hasNext()) {
-			EntityRenderState state = iterator.next();
-			if (state instanceof DisplayEntityRenderState) {
-				if (selectedCursor < selectedCount
-						&& selectedIndices[selectedCursor] == rawIndex) {
-					selectedCursor++;
-				} else {
-					iterator.remove();
-					removed++;
-				}
-			}
-			rawIndex++;
-		}
-		return removed;
+		return DisplayEntityCompaction.retainSelected(
+				states, selectedIndices, selectedCount, state -> state instanceof DisplayEntityRenderState
+		);
 	}
 
 	private static void offerDisplayCandidate(
@@ -743,6 +696,7 @@ public final class VoltGuardEngine {
 	}
 
 	private static final class FrameState {
+		private final ParticleSelectionPrefix<Particle> particlePrefix = new ParticleSelectionPrefix<>();
 		private final SpillAwareParticleSelector<Particle> particleSelection =
 				new SpillAwareParticleSelector<>();
 		private final BlockEntityGuardHandoff<BlockEntityRenderState> blockEntityHandoff =
@@ -807,6 +761,7 @@ public final class VoltGuardEngine {
 			this.suppressedParticles = 0;
 			this.clearSelections();
 			this.particleSelection.releaseStorage();
+			this.particlePrefix.releaseStorage();
 			this.blockEntityHandoff.releaseStorage();
 			this.displayEntitySelection.releaseStorage();
 			this.selectedDisplayEntityIndices = new int[0];
@@ -826,6 +781,7 @@ public final class VoltGuardEngine {
 		}
 
 		private void clearParticleSelection() {
+			this.particlePrefix.clear();
 			this.particleSelection.abort();
 			this.selectedParticles.clear();
 		}

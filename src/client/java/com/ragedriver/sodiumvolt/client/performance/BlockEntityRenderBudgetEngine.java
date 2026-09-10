@@ -517,20 +517,25 @@ public final class BlockEntityRenderBudgetEngine {
             return;
         }
         int survivorIndex = 0;
-        Iterator<BlockEntityRenderState> iterator = states.iterator();
-        while (iterator.hasNext()) {
-            BlockEntityRenderState state = iterator.next();
+        int originalSize = states.size();
+        for (int index = 0; index < originalSize; index++) {
+            BlockEntityRenderState state = states.get(index);
             int decision = removeRejected
                     ? frameDecisions.decision(state)
                     : VapsIdentityDecisionTable.UNKNOWN;
-            if (decision == VapsIdentityDecisionTable.SCANNED) {
-                iterator.remove();
-            } else {
+            if (decision != VapsIdentityDecisionTable.SCANNED) {
                 if (guardHandoffStarted) {
                     VoltGuardEngine.offerBlockEntitySurvivor(state, survivorIndex);
                 }
+                if (survivorIndex != index) {
+                    states.set(survivorIndex, state);
+                }
                 survivorIndex++;
             }
+        }
+        // Compact once so rejected states cannot cause quadratic ArrayList shifts.
+        if (survivorIndex < originalSize) {
+            states.subList(survivorIndex, originalSize).clear();
         }
         if (guardHandoffStarted) {
             VoltGuardEngine.completeBlockEntityHandoff(states);

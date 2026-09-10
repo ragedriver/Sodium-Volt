@@ -2,7 +2,6 @@ package com.ragedriver.sodiumvolt.client.guard;
 
 import java.util.Collections;
 import java.util.IdentityHashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
@@ -88,11 +87,19 @@ final class BlockEntityGuardHandoff<T> {
 				if (!this.prioritized) {
 					states.subList(this.budget, originalSize).clear();
 				} else {
-					Iterator<T> iterator = states.iterator();
-					while (iterator.hasNext()) {
-						if (!this.selected.contains(iterator.next())) {
-							iterator.remove();
+					int retained = 0;
+					for (int index = 0; index < originalSize; index++) {
+						T state = states.get(index);
+						if (this.selected.contains(state)) {
+							if (retained != index) {
+								states.set(retained, state);
+							}
+							retained++;
 						}
+					}
+					// One tail clear avoids shifting the remaining ArrayList on every rejection.
+					if (retained < originalSize) {
+						states.subList(retained, originalSize).clear();
 					}
 				}
 			}

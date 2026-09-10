@@ -1,5 +1,6 @@
 package com.ragedriver.sodiumvolt.client.guard;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
@@ -15,6 +16,8 @@ final class SpillAwareParticleSelector<T> {
 	private final BoundedTopK<T> spill = new BoundedTopK<>();
 	private final Set<T> identityScratch =
 			Collections.newSetFromMap(new IdentityHashMap<>());
+	private Object[] unrankedValues = new Object[0];
+	private int unrankedSize;
 	private int budget;
 	private boolean prioritizeDistance;
 	private boolean preserveCritical;
@@ -39,10 +42,26 @@ final class SpillAwareParticleSelector<T> {
 			double distanceSquared,
 			int originalIndex
 	) {
+		// Callers supply candidates in ascending original-index order. Count
+		// occurrences, not unique identities, to preserve legacy underfill.
+		if (!this.requiresRanking()) {
+			if (this.unrankedSize < this.budget) {
+				if (this.unrankedSize == this.unrankedValues.length) {
+					int capacity = (int) Math.min(this.budget, Math.max(8L, this.unrankedSize * 2L));
+					this.unrankedValues = Arrays.copyOf(this.unrankedValues, capacity);
+				}
+				this.unrankedValues[this.unrankedSize++] = value;
+			}
+			return;
+		}
 		if (specialCandidate) {
 			this.special.offer(value, false, true, distanceSquared, originalIndex);
 		}
 		this.spill.offer(value, false, critical, distanceSquared, originalIndex);
+	}
+
+	boolean requiresRanking() {
+		return this.prioritizeDistance || this.preserveCritical;
 	}
 
 	/**
@@ -50,7 +69,15 @@ final class SpillAwareParticleSelector<T> {
 	 * only the reserved identities selected and prepares the general selector
 	 * for an exact replay of non-reserved candidates.
 	 */
+	@SuppressWarnings("unchecked")
 	boolean finishFromSpill(Set<T> selected, int specialCandidateCount) {
+		if (!this.requiresRanking()) {
+			for (int index = 0; index < this.unrankedSize; index++) {
+				selected.add((T) this.unrankedValues[index]);
+			}
+			this.clearUnranked();
+			return true;
+		}
 		this.special.addTo(selected);
 		this.special.clear();
 		ParticleBudgetPlan plan = ParticleBudgetPlan.create(
@@ -91,7 +118,13 @@ final class SpillAwareParticleSelector<T> {
 		this.spill.clear();
 	}
 
+	private void clearUnranked() {
+		Arrays.fill(this.unrankedValues, 0, this.unrankedSize, null);
+		this.unrankedSize = 0;
+	}
+
 	void abort() {
+		this.clearUnranked();
 		this.special.clear();
 		this.spill.clear();
 		this.identityScratch.clear();
@@ -104,15 +137,22 @@ final class SpillAwareParticleSelector<T> {
 		this.abort();
 		this.special.releaseStorage();
 		this.spill.releaseStorage();
+		this.unrankedValues = new Object[0];
 	}
 
 	boolean retainsReferenceForTesting(T value) {
+		for (Object retained : this.unrankedValues) {
+			if (retained == value) {
+				return true;
+			}
+		}
 		return this.special.retainsValueForTesting(value)
 				|| this.spill.retainsValueForTesting(value);
 	}
 
 	int allocatedEntriesForTesting() {
 		return this.special.allocatedEntryCount()
-				+ this.spill.allocatedEntryCount();
+				+ this.spill.allocatedEntryCount()
+				+ this.unrankedValues.length;
 	}
 }

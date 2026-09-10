@@ -19,7 +19,10 @@ final class AttResourceExemptionLoader {
 	private AttResourceExemptionLoader() {
 	}
 
-	static LoadResult load(ResourceManager manager) {
+	static LoadResult load(ResourceManager manager, boolean honorExemptions) {
+		if (!honorExemptions) {
+			return new LoadResult(new String[0], 0, 0, false);
+		}
 		String[] accepted = new String[AttExemptionParsing.MAX_RESOURCE_ENTRIES];
 		int acceptedCount = 0;
 		int filesRead = 0;

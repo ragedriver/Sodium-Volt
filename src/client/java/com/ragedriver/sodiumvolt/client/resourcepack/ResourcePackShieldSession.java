@@ -100,7 +100,7 @@ final class ResourcePackShieldSession {
 
 	boolean isCurrent() {
 		boolean current = !this.closed.get() && ResourcePackShieldEngine.isCurrent(
-				this.configRevision, this.controlGeneration, this.source
+				this.source
 		);
 		if (!current) {
 			this.directoryValidationCache.clear();
@@ -118,7 +118,19 @@ final class ResourcePackShieldSession {
 	}
 
 	boolean isRejected() {
-		return isCurrent() && this.rejected.get();
+		if (this.closed.get()) {
+			return true;
+		}
+		if (!isCurrent()) {
+			return false;
+		}
+		// Validators and aggregate reservations belong to this immutable policy.
+		// Retire the session instead of resetting its budgets or losing inspection
+		// history. The engine schedules a reload to create the replacement.
+		if (this.configRevision != ResourcePackShieldEngine.enforcementRevision()) {
+			markRejected();
+		}
+		return this.rejected.get();
 	}
 
 	boolean validateLogicalPath(String logicalPath) {
@@ -212,6 +224,14 @@ final class ResourcePackShieldSession {
 			InputStream input,
 			ShieldedInputStream.ContentKind contentKind
 	) {
+		if (isRejected()) {
+			try {
+				input.close();
+			} catch (IOException ignored) {
+				// Rejection must not leak the newly opened delegate stream.
+			}
+			throw new ResourcePackShieldRejectedException();
+		}
 		if (!isCurrent()) {
 			return input;
 		}
@@ -221,7 +241,8 @@ final class ResourcePackShieldSession {
 				this.readBudget,
 				contentKind,
 				this.policy,
-				this::onViolation
+				this::onViolation,
+				this::isRejected
 		);
 	}
 

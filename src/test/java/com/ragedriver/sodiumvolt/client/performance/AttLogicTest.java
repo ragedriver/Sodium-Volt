@@ -15,6 +15,8 @@ public final class AttLogicTest {
 
 	public static void main(String[] arguments) {
 		testIdentifiersAndJson();
+		testCollidingIdentifiers();
+		testDisabledExemptionLoadingAndToggle();
 		testInvisibleAndKeepalive();
 		testElapsedBoundaries();
 		testDistanceApcAndResumeCadence();
@@ -52,6 +54,70 @@ public final class AttLogicTest {
 				"resource JSON must reject malformed IDs without widening exemptions");
 		expectFailure(() -> AttResourceExemptionJson.parse("{\"textures\":{}}"),
 				"malformed exemption JSON must fail as one bounded resource");
+	}
+
+	private static void testCollidingIdentifiers() {
+		// Reproduce the old 32-probe failure using actual Minecraft Identifier hashes.
+		List<String> colliding = new ArrayList<>();
+		for (int candidate = 0; colliding.size() < 128 && candidate < 1_000_000; candidate++) {
+			String value = "attack:texture_" + candidate;
+			int hash = Identifier.parse(value).hashCode();
+			hash ^= hash >>> 16;
+			hash *= 0x7FEB352D;
+			hash ^= hash >>> 15;
+			hash *= 0x846CA68B;
+			hash ^= hash >>> 16;
+			if ((hash & 255) == 0) {
+				colliding.add(value);
+			}
+		}
+		check(colliding.size() == 128, "collision fixture must fill both accepted lists");
+		String json = "{\"textures\":[\"" + String.join("\",\"", colliding.subList(0, 33)) + "\"]}";
+		AttResourceExemptionJson.ParseResult parsed = AttResourceExemptionJson.parse(json);
+		check(parsed.identifiers().length == 33 && !parsed.truncated(),
+				"the original attack must remain valid bounded resource JSON");
+		AttIdentifierLookup lookup = new AttIdentifierLookup();
+		for (String value : parsed.identifiers()) {
+			check(lookup.add(value), "all 33 colliding resource identifiers must be accepted");
+		}
+		for (String value : colliding.subList(33, 128)) {
+			check(lookup.add(value), "all accepted user plus resource entries must fit");
+		}
+		check(lookup.size() == 128 && !lookup.add("attack:overflow"),
+				"storage must stay bounded even if a caller exceeds parser limits");
+		for (String value : colliding) {
+			check(lookup.contains(Identifier.parse(value)) && !lookup.add(value),
+					"collision and capacity pressure must preserve exact membership and deduplication");
+		}
+		check(!lookup.contains(null) && !lookup.contains(Identifier.parse("other:texture_0"))
+				&& !lookup.contains(Identifier.parse("attack:overflow")),
+				"absent IDs must not gain exemptions");
+	}
+
+	private static void testDisabledExemptionLoadingAndToggle() {
+		AttResourceExemptionLoader.LoadResult disabled = AttResourceExemptionLoader.load(null, false);
+		check(disabled.identifiers().length == 0 && disabled.filesRead() == 0
+				&& disabled.bytesRead() == 0 && !disabled.truncated(),
+				"disabled exemption lists must never access even the resource manager");
+		AttExemptionReloadGate gate = new AttExemptionReloadGate();
+		long disabledGeneration = gate.onEnabledTick(false);
+		gate.complete(disabledGeneration);
+		check(gate.ready() && gate.onEnabledTick(false) == 0L,
+				"disabled lists must allow scheduling without repeating discovery");
+		long enabledGeneration = gate.onEnabledTick(true);
+		check(enabledGeneration != 0L && !gate.ready(),
+				"enabling lists must request their current resources without a resource reload");
+		check(gate.onEnabledTick(false) == 0L,
+				"a setting change during discovery must coalesce with the active scan");
+		AttExemptionReloadGate.Completion stale = gate.complete(enabledGeneration);
+		check(!stale.publish() && stale.followUpGeneration() != 0L,
+				"a stale enabled-list scan must not overwrite the disabled-list generation");
+		gate.complete(stale.followUpGeneration());
+		check(gate.ready(), "the latest disabled setting must become schedulable");
+		long reload = gate.onResourceReload(true, false);
+		gate.complete(reload);
+		check(gate.onEnabledTick(false) == 0L && gate.onEnabledTick(true) != 0L,
+				"a disabled-list reload must still permit later activation");
 	}
 
 	private static void testInvisibleAndKeepalive() {
@@ -247,29 +313,29 @@ public final class AttLogicTest {
 
 	private static void testDisabledReloadDeferral() {
 		AttExemptionReloadGate gate = new AttExemptionReloadGate();
-		check(gate.onResourceReload(false) == 0L,
+		check(gate.onResourceReload(false, true) == 0L,
 				"disabled ATT reloads must skip exemption resource discovery");
-		long activation = gate.onEnabledTick();
+		long activation = gate.onEnabledTick(true);
 		check(activation != 0L,
 				"enabling after a skipped reload must discover current exemptions once");
 		check(!gate.ready(),
 				"ATT must fail open while deferred exemptions are still stale");
 		check(gate.complete(activation).publish(),
 				"the current activation scan must publish");
-		check(gate.ready() && gate.onEnabledTick() == 0L,
+		check(gate.ready() && gate.onEnabledTick(true) == 0L,
 				"stable enabled ticks must not repeat exemption discovery");
-		long reload = gate.onResourceReload(true);
+		long reload = gate.onResourceReload(true, true);
 		check(reload != 0L,
 				"enabled ATT reloads must discover updated exemptions immediately");
 		gate.complete(reload);
-		check(gate.onEnabledTick() == 0L,
+		check(gate.onEnabledTick(true) == 0L,
 				"a completed enabled reload must not be repeated on the next tick");
 	}
 
 	private static void testReloadGenerationRejectsStalePublication() {
 		AttExemptionReloadGate gate = new AttExemptionReloadGate();
-		long first = gate.onEnabledTick();
-		check(first != 0L && gate.onResourceReload(true) == 0L,
+		long first = gate.onEnabledTick(true);
+		check(first != 0L && gate.onResourceReload(true, true) == 0L,
 				"an in-flight scan owns the generation until completion");
 		AtomicInteger published = new AtomicInteger();
 		AttExemptionReloadGate.Completion stale = gate.complete(
@@ -287,13 +353,13 @@ public final class AttLogicTest {
 
 	private static void testReloadPublicationAcrossThreads() {
 		AttExemptionReloadGate gate = new AttExemptionReloadGate();
-		long initial = gate.onEnabledTick();
+		long initial = gate.onEnabledTick(true);
 		gate.complete(initial);
 		CountDownLatch dirtyPublished = new CountDownLatch(1);
 		CountDownLatch allowCompletion = new CountDownLatch(1);
 		AtomicBoolean reloadAccepted = new AtomicBoolean();
 		Thread reloadThread = new Thread(() -> {
-			long generation = gate.onResourceReload(true);
+			long generation = gate.onResourceReload(true, true);
 			reloadAccepted.set(generation != 0L);
 			dirtyPublished.countDown();
 			try {
@@ -313,9 +379,9 @@ public final class AttLogicTest {
 		try {
 			check(dirtyPublished.await(5L, TimeUnit.SECONDS),
 					"the reload thread must publish its dirty transition");
-			check(reloadAccepted.get() && !gate.ready() && gate.onEnabledTick() == 0L,
+			check(reloadAccepted.get() && !gate.ready() && gate.onEnabledTick(true) == 0L,
 					"the client thread must fail open while an enabled reload is pending");
-			check(gate.onResourceReload(true) == 0L,
+			check(gate.onResourceReload(true, true) == 0L,
 					"a reload arriving in flight must coalesce instead of starting a duplicate scan");
 			allowCompletion.countDown();
 			reloadThread.join(5_000L);

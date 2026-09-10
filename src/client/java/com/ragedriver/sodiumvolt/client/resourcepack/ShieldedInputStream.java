@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class ShieldedInputStream extends InputStream {
@@ -28,6 +29,7 @@ public final class ShieldedInputStream extends InputStream {
 	private final long maximumResourceBytes;
 	private final ShieldReadBudget aggregateBudget;
 	private final ViolationHandler violationHandler;
+	private final BooleanSupplier sessionRejected;
 	private final ContentKind contentKind;
 	private final ResourcePackShieldPolicy policy;
 	private final ShieldReadBudget.Reservation readReservation;
@@ -51,6 +53,20 @@ public final class ShieldedInputStream extends InputStream {
 			ResourcePackShieldPolicy policy,
 			ViolationHandler violationHandler
 	) {
+		this(delegate, maximumResourceBytes, aggregateBudget, contentKind, policy,
+				violationHandler, () -> false);
+	}
+
+	ShieldedInputStream(
+			InputStream delegate,
+			long maximumResourceBytes,
+			ShieldReadBudget aggregateBudget,
+			ContentKind contentKind,
+			ResourcePackShieldPolicy policy,
+			ViolationHandler violationHandler,
+			BooleanSupplier sessionRejected
+	) {
+		this.sessionRejected = Objects.requireNonNull(sessionRejected, "sessionRejected");
 		this.delegate = Objects.requireNonNull(delegate, "delegate");
 		this.maximumResourceBytes = Math.max(1L, maximumResourceBytes);
 		this.aggregateBudget = Objects.requireNonNull(aggregateBudget, "aggregateBudget");
@@ -295,6 +311,13 @@ public final class ShieldedInputStream extends InputStream {
 			Thread.currentThread().interrupt();
 			throw new IOException("Interrupted while reserving resource-pack read budget", exception);
 		}
+		try {
+			// Reservation acquisition may wait for another reader while policy changes.
+			ensureReadable();
+		} catch (IOException exception) {
+			reservation.close();
+			throw exception;
+		}
 		if (reservation.exhausted()) {
 			try {
 				reportIfNeeded(ShieldReason.LIVE_READ_LIMIT);
@@ -406,7 +429,7 @@ public final class ShieldedInputStream extends InputStream {
 		if (this.closed.get()) {
 			throw new IOException("Stream is closed");
 		}
-		if (this.rejected) {
+		if (this.rejected || this.sessionRejected.getAsBoolean()) {
 			throw new IOException("Resource pack rejected by Resource-Pack Shield policy");
 		}
 	}

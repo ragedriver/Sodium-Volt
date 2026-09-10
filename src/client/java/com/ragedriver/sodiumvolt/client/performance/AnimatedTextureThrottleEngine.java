@@ -50,6 +50,7 @@ public final class AnimatedTextureThrottleEngine {
 	private static float visibleSectionDistance;
 	private static boolean failureLogged;
 	private static boolean mappingFailureLogged;
+	private static boolean previousHonorExemptionLists;
 
 	private AnimatedTextureThrottleEngine() {
 	}
@@ -66,8 +67,11 @@ public final class AnimatedTextureThrottleEngine {
 				return;
 			}
 			RUNTIME_LIFECYCLE.observeAndShouldCleanup(true);
-			if (RUNTIME_LIFECYCLE.consumeActivation()) {
-				requestEnabledExemptionReload(client.getResourceManager());
+			boolean activated = RUNTIME_LIFECYCLE.consumeActivation();
+			boolean honorExemptions = CONFIG.isAttHonorExemptionLists();
+			if (activated || honorExemptions != previousHonorExemptionLists) {
+				previousHonorExemptionLists = honorExemptions;
+				requestEnabledExemptionReload(client.getResourceManager(), honorExemptions);
 			}
 			clientTick = AttPolicy.saturatingAdd(clientTick, 1L);
 		});
@@ -89,8 +93,7 @@ public final class AnimatedTextureThrottleEngine {
 	public static boolean canSchedule() {
 		return isConfiguredEnabled()
 				&& EXEMPTION_RELOAD_GATE.ready()
-				&& FAILURE.canRun()
-				&& !exemptionLookup.isSaturated();
+				&& FAILURE.canRun();
 	}
 
 	public static AttStateSpriteMapping<SpriteContents.AnimationState, TextureAtlasSprite> buildMapping(
@@ -136,8 +139,7 @@ public final class AnimatedTextureThrottleEngine {
 
 	public static TickGate gateStateTick(TextureAtlasSprite sprite) {
 		AttRuntimeSettings.AtlasCycle cycle = AttAnimationCycleContext.current();
-		if (cycle == null || !FAILURE.canRun()
-				|| cycle.exemptionLookup().isSaturated() || sprite == null) {
+		if (cycle == null || !FAILURE.canRun() || sprite == null) {
 			return TickGate.ALLOW_FAIL_OPEN;
 		}
 		AttPolicy.Decision decision;
@@ -379,14 +381,14 @@ public final class AnimatedTextureThrottleEngine {
 	private static void requestResourceReload(ResourceManager manager) {
 		latestResourceManager = manager;
 		long generation = EXEMPTION_RELOAD_GATE.onResourceReload(
-				CONFIG.isAnimatedTextureThrottlingEnabled()
+				CONFIG.isAnimatedTextureThrottlingEnabled(), CONFIG.isAttHonorExemptionLists()
 		);
 		runExemptionLoads(generation);
 	}
 
-	private static void requestEnabledExemptionReload(ResourceManager manager) {
+	private static void requestEnabledExemptionReload(ResourceManager manager, boolean honorExemptions) {
 		latestResourceManager = manager;
-		runExemptionLoads(EXEMPTION_RELOAD_GATE.onEnabledTick());
+		runExemptionLoads(EXEMPTION_RELOAD_GATE.onEnabledTick(honorExemptions));
 	}
 
 	private static void runExemptionLoads(long generation) {
@@ -398,8 +400,10 @@ public final class AnimatedTextureThrottleEngine {
 					EXEMPTION_RELOAD_GATE.fail(current);
 					return;
 				}
-				AttResourceExemptionLoader.LoadResult result = AttResourceExemptionLoader.load(manager);
-				AttIdentifierLookup replacement = buildExemptionLookup(result.identifiers());
+				boolean honorExemptions = CONFIG.isAttHonorExemptionLists();
+				AttResourceExemptionLoader.LoadResult result =
+						AttResourceExemptionLoader.load(manager, honorExemptions);
+				AttIdentifierLookup replacement = buildExemptionLookup(result.identifiers(), honorExemptions);
 				AttExemptionReloadGate.Completion completion =
 						EXEMPTION_RELOAD_GATE.complete(current, () -> exemptionLookup = replacement);
 				if (completion.publish()) {
@@ -416,11 +420,14 @@ public final class AnimatedTextureThrottleEngine {
 	}
 
 	private static void rebuildExemptionLookup(String[] resources) {
-		exemptionLookup = buildExemptionLookup(resources);
+		exemptionLookup = buildExemptionLookup(resources, CONFIG.isAttHonorExemptionLists());
 	}
 
-	private static AttIdentifierLookup buildExemptionLookup(String[] resources) {
+	private static AttIdentifierLookup buildExemptionLookup(String[] resources, boolean honorExemptions) {
 		AttIdentifierLookup replacement = new AttIdentifierLookup();
+		if (!honorExemptions) {
+			return replacement;
+		}
 		for (String user : CONFIG.getAttUserExemptTextures()) {
 			replacement.add(user);
 		}

@@ -2,14 +2,13 @@ package com.ragedriver.sodiumvolt.client.performance;
 
 import net.minecraft.resources.Identifier;
 
+/** Bounded, sorted exact-ID lookup; hash collisions cannot affect scheduling. */
 final class AttIdentifierLookup {
-	private static final int TABLE_SIZE = 256;
-	private static final int TABLE_MASK = TABLE_SIZE - 1;
-	private static final int MAX_PROBES = 32;
+	private static final int CAPACITY = AttExemptionParsing.MAX_USER_ENTRIES
+			+ AttExemptionParsing.MAX_RESOURCE_ENTRIES;
 
-	private final Identifier[] values = new Identifier[TABLE_SIZE];
+	private final Identifier[] values = new Identifier[CAPACITY];
 	private int size;
-	private boolean saturated;
 
 	boolean add(String value) {
 		if (!AttExemptionParsing.isValidIdentifier(value)) {
@@ -21,54 +20,39 @@ final class AttIdentifierLookup {
 		} catch (RuntimeException exception) {
 			return false;
 		}
-		int index = mix(identifier.hashCode()) & TABLE_MASK;
-		for (int probe = 0; probe < MAX_PROBES; probe++) {
-			Identifier existing = this.values[index];
-			if (existing == null) {
-				this.values[index] = identifier;
-				this.size++;
-				return true;
-			}
-			if (existing.equals(identifier)) {
-				return false;
-			}
-			index = index + 1 & TABLE_MASK;
+		int index = find(identifier);
+		if (index >= 0 || this.size == this.values.length) {
+			return false;
 		}
-		this.saturated = true;
-		return false;
+		index = -index - 1;
+		System.arraycopy(this.values, index, this.values, index + 1, this.size - index);
+		this.values[index] = identifier;
+		this.size++;
+		return true;
 	}
 
 	boolean contains(Identifier identifier) {
-		if (identifier == null) {
-			return false;
-		}
-		int index = mix(identifier.hashCode()) & TABLE_MASK;
-		for (int probe = 0; probe < MAX_PROBES; probe++) {
-			Identifier existing = this.values[index];
-			if (existing == null) {
-				return false;
-			}
-			if (existing.equals(identifier)) {
-				return true;
-			}
-			index = index + 1 & TABLE_MASK;
-		}
-		return false;
+		return identifier != null && find(identifier) >= 0;
 	}
 
 	int size() {
 		return this.size;
 	}
 
-	boolean isSaturated() {
-		return this.saturated;
-	}
-
-	private static int mix(int value) {
-		value ^= value >>> 16;
-		value *= 0x7FEB352D;
-		value ^= value >>> 15;
-		value *= 0x846CA68B;
-		return value ^ value >>> 16;
+	private int find(Identifier identifier) {
+		int low = 0;
+		int high = this.size - 1;
+		while (low <= high) {
+			int middle = (low + high) >>> 1;
+			int comparison = this.values[middle].compareTo(identifier);
+			if (comparison < 0) {
+				low = middle + 1;
+			} else if (comparison > 0) {
+				high = middle - 1;
+			} else {
+				return middle;
+			}
+		}
+		return -low - 1;
 	}
 }

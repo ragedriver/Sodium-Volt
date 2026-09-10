@@ -1,5 +1,21 @@
 # Sodium Volt Changelog
 
+## 1.0.3+mc26.2
+
+### Performance Improvements
+
+- Removed duplicate particle eligibility checks from Volt Guard's normal fallback planning.
+- Reduced Volt Guard particle selection work when both priority options are disabled.
+- Delayed Volt Guard particle ranking until the eligible particle count exceeds the budget.
+
+### Fixes
+
+- Fixed Volt Guard entity filtering causing severe slowdowns under heavy entity loads.
+- Fixed crafted texture exemption lists disabling Animated Texture Throttling globally.
+- Fixed Animated Texture Throttling not fully respecting changes to the exemption-list setting.
+- Fixed Resource-Pack Shield settings changes silently disabling protection for loaded packs.
+- Fixed malformed ZIP layouts bypassing Resource-Pack Shield archive limits.
+
 ## 1.0.2+mc26.2
 
 ### New Features

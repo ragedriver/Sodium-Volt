@@ -49,6 +49,8 @@ public final class ResourcePackShieldEngine {
 			SYNCHRONOUS_RELOAD_CONTEXT = new ThreadLocal<>();
 
 	private static volatile long observedRevision = Long.MIN_VALUE;
+	private static long observedEnforcementRevision = Long.MIN_VALUE;
+	private static final AtomicBoolean POLICY_RELOAD_PENDING = new AtomicBoolean();
 	private static volatile boolean runtimeEnabled;
 	private static volatile boolean runtimeShowTransitionNotifications;
 	private static volatile ShieldReason lastReason = ShieldReason.NONE;
@@ -220,7 +222,7 @@ public final class ResourcePackShieldEngine {
 		if (!runtimeEnabled || !scopeEnabled(source, config)) {
 			return delegate;
 		}
-		long revision = config.revision();
+		long revision = config.enforcementRevision();
 		ShieldScanBudget.Allowance allowance = scanAllowance(config.policy());
 		ResourcePackShieldPolicy policy = allowance.policy();
 		ShieldOverlayPlan.Validation overlayValidation = allowance.expired()
@@ -292,6 +294,9 @@ public final class ResourcePackShieldEngine {
 			ResourcePackShieldSession session,
 			ShieldReason reason
 	) {
+		if (session.isRejected()) {
+			return true;
+		}
 		if (!session.isCurrent()) {
 			return false;
 		}
@@ -360,11 +365,22 @@ public final class ResourcePackShieldEngine {
 				runtimeEnabled
 		)) {
 			processPendingNotice(minecraft);
+			processPolicyReload(minecraft);
 			return;
 		}
 		ResourcePackShieldConfig.RuntimeSnapshot config = CONFIG.runtimeSnapshot();
 		refreshControl(config);
 		processPendingNotice(minecraft);
+		processPolicyReload(minecraft);
+	}
+
+	private static void processPolicyReload(Minecraft minecraft) {
+		if (ACTIVE_RELOADS.get() == 0 && minecraft.gui.overlay() == null
+				&& POLICY_RELOAD_PENDING.compareAndSet(true, false)) {
+			// One reload applies the final settings batch and replaces retired sessions.
+			// A failed reload is not retried every tick.
+			minecraft.reloadResourcePacks();
+		}
 	}
 
 	private static void processPendingNotice(Minecraft minecraft) {
@@ -418,14 +434,19 @@ public final class ResourcePackShieldEngine {
 		if (revision == observedRevision && enabled == runtimeEnabled) {
 			return;
 		}
+		if (observedEnforcementRevision != Long.MIN_VALUE
+				&& observedEnforcementRevision != config.enforcementRevision() && enabled) {
+			POLICY_RELOAD_PENDING.set(true);
+		}
+		observedEnforcementRevision = config.enforcementRevision();
 		observedRevision = revision;
 		runtimeEnabled = enabled;
 		runtimeShowTransitionNotifications = config.showTransitionNotifications();
-		nextSequence(CONTROL_GENERATION);
-		ACTIVE_RELOADS.set(0);
-		AGGREGATE_SCAN_DEADLINE_NANOS.set(0L);
-		READY_EVENT_SEQUENCE.set(0L);
-		PENDING_NOTICE.set(null);
+		// Settings must not abandon in-flight reload budgets or rejection tokens.
+		if (!enabled) {
+			PENDING_NOTICE.set(null);
+			POLICY_RELOAD_PENDING.set(false);
+		}
 	}
 
 	private static ShieldScanBudget.Allowance scanAllowance(
@@ -489,15 +510,13 @@ public final class ResourcePackShieldEngine {
 				|| source == ShieldSourceKind.SERVER && config.monitorServerPacks();
 	}
 
-	static boolean isCurrent(
-			long revision,
-			long controlGeneration,
-			ShieldSourceKind source
-	) {
+	static boolean isCurrent(ShieldSourceKind source) {
 		return CONFIG.isResourcePackShieldEnabled()
-				&& CONFIG.revision() == revision
-				&& CONTROL_GENERATION.get() == controlGeneration
 				&& scopeEnabled(source);
+	}
+
+	static long enforcementRevision() {
+		return CONFIG.enforcementRevision();
 	}
 
 	private static long nextSequence(AtomicLong value) {

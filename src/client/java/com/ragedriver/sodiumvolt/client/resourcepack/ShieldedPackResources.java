@@ -169,6 +169,9 @@ final class ShieldedPackResources implements PackResources {
 		}
 		ShieldedInputStream.ContentKind contentKind = contentKind(logicalPath);
 		return () -> {
+			if (this.session.isRejected()) {
+				throw new IOException("Resource pack session requires reopening under current Shield policy");
+			}
 			if (!this.session.isCurrent()) {
 				return supplier.get();
 			}

@@ -108,6 +108,7 @@ public final class ResourcePackShieldConfig {
 	private volatile boolean showInspectorStatistics = true;
 	private volatile boolean wasEverEnabled;
 	private volatile long revision;
+	private volatile long enforcementRevision;
 
 	private ResourcePackShieldConfig() {
 	}
@@ -125,9 +126,13 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setResourcePackShieldEnabled(boolean value) {
+		boolean previous = this.resourcePackShieldEnabled;
 		this.resourcePackShieldEnabled = value;
 		this.wasEverEnabled |= value;
 		this.revision++;
+		if (previous != this.resourcePackShieldEnabled) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public boolean isMonitorLocalPacks() {
@@ -135,8 +140,12 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMonitorLocalPacks(boolean value) {
+		boolean previous = this.monitorLocalPacks;
 		this.monitorLocalPacks = value;
 		this.revision++;
+		if (previous != this.monitorLocalPacks) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public boolean isMonitorServerPacks() {
@@ -144,8 +153,12 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMonitorServerPacks(boolean value) {
+		boolean previous = this.monitorServerPacks;
 		this.monitorServerPacks = value;
 		this.revision++;
+		if (previous != this.monitorServerPacks) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public boolean isDetectUnsafePathsAndSymlinks() {
@@ -153,8 +166,12 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setDetectUnsafePathsAndSymlinks(boolean value) {
+		boolean previous = this.detectUnsafePathsAndSymlinks;
 		this.detectUnsafePathsAndSymlinks = value;
 		this.revision++;
+		if (previous != this.detectUnsafePathsAndSymlinks) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public boolean isBlockCoreShaderOverrides() {
@@ -162,8 +179,12 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setBlockCoreShaderOverrides(boolean value) {
+		boolean previous = this.blockCoreShaderOverrides;
 		this.blockCoreShaderOverrides = value;
 		this.revision++;
+		if (previous != this.blockCoreShaderOverrides) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public boolean isRejectViolations() {
@@ -171,8 +192,12 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setRejectViolations(boolean value) {
+		boolean previous = this.rejectViolations;
 		this.rejectViolations = value;
 		this.revision++;
+		if (previous != this.rejectViolations) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumEntries() {
@@ -180,10 +205,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumEntries(int value) {
+		int previous = this.maximumEntries;
 		this.maximumEntries = clampStep(
 				value, ENTRY_LIMIT_MIN, ENTRY_LIMIT_MAX, ENTRY_LIMIT_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumEntries) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumArchiveMiB() {
@@ -191,10 +220,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumArchiveMiB(int value) {
+		int previous = this.maximumArchiveMiB;
 		this.maximumArchiveMiB = clampStep(
 				value, ARCHIVE_MIB_MIN, ARCHIVE_MIB_MAX, ARCHIVE_MIB_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumArchiveMiB) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumSingleResourceMiB() {
@@ -202,6 +235,7 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumSingleResourceMiB(int value) {
+		int previous = this.maximumSingleResourceMiB;
 		this.maximumSingleResourceMiB = clampStep(
 				value, SINGLE_MIB_MIN, SINGLE_MIB_MAX, 1
 		);
@@ -209,6 +243,9 @@ public final class ResourcePackShieldConfig {
 				this.maximumTotalReadMiB, this.maximumSingleResourceMiB
 		);
 		this.revision++;
+		if (previous != this.maximumSingleResourceMiB) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumTotalReadMiB() {
@@ -216,10 +253,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumTotalReadMiB(int value) {
+		int previous = this.maximumTotalReadMiB;
 		this.maximumTotalReadMiB = validTotalAtLeast(
 				value, this.maximumSingleResourceMiB
 		);
 		this.revision++;
+		if (previous != this.maximumTotalReadMiB) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumCompressionRatio() {
@@ -227,8 +268,12 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumCompressionRatio(int value) {
+		int previous = this.maximumCompressionRatio;
 		this.maximumCompressionRatio = clampStep(value, RATIO_MIN, RATIO_MAX, RATIO_STEP);
 		this.revision++;
+		if (previous != this.maximumCompressionRatio) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumPngDimension() {
@@ -236,10 +281,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumPngDimension(int value) {
+		int previous = this.maximumPngDimension;
 		this.maximumPngDimension = clampStep(
 				value, PNG_DIMENSION_MIN, PNG_DIMENSION_MAX, PNG_DIMENSION_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumPngDimension) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumPngMegapixels() {
@@ -247,10 +296,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumPngMegapixels(int value) {
+		int previous = this.maximumPngMegapixels;
 		this.maximumPngMegapixels = clampStep(
 				value, PNG_MEGAPIXELS_MIN, PNG_MEGAPIXELS_MAX, PNG_MEGAPIXELS_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumPngMegapixels) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumJsonDepth() {
@@ -258,10 +311,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumJsonDepth(int value) {
+		int previous = this.maximumJsonDepth;
 		this.maximumJsonDepth = clampStep(
 				value, JSON_DEPTH_MIN, JSON_DEPTH_MAX, JSON_DEPTH_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumJsonDepth) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumPathLength() {
@@ -269,10 +326,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumPathLength(int value) {
+		int previous = this.maximumPathLength;
 		this.maximumPathLength = clampStep(
 				value, PATH_LENGTH_MIN, PATH_LENGTH_MAX, PATH_LENGTH_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumPathLength) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumPathDepth() {
@@ -280,10 +341,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumPathDepth(int value) {
+		int previous = this.maximumPathDepth;
 		this.maximumPathDepth = clampStep(
 				value, PATH_DEPTH_MIN, PATH_DEPTH_MAX, PATH_DEPTH_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumPathDepth) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public int getMaximumScanMillis() {
@@ -291,10 +356,14 @@ public final class ResourcePackShieldConfig {
 	}
 
 	public synchronized void setMaximumScanMillis(int value) {
+		int previous = this.maximumScanMillis;
 		this.maximumScanMillis = clampStep(
 				value, SCAN_MILLIS_MIN, SCAN_MILLIS_MAX, SCAN_MILLIS_STEP
 		);
 		this.revision++;
+		if (previous != this.maximumScanMillis) {
+			this.enforcementRevision++;
+		}
 	}
 
 	public boolean isShowTransitionNotifications() {
@@ -328,6 +397,10 @@ public final class ResourcePackShieldConfig {
 		return this.revision;
 	}
 
+	public long enforcementRevision() {
+		return this.enforcementRevision;
+	}
+
 	public synchronized ResourcePackShieldPolicy policySnapshot() {
 		return policySnapshotUnlocked();
 	}
@@ -335,6 +408,7 @@ public final class ResourcePackShieldConfig {
 	public synchronized RuntimeSnapshot runtimeSnapshot() {
 		return new RuntimeSnapshot(
 				this.revision,
+				this.enforcementRevision,
 				this.resourcePackShieldEnabled,
 				this.monitorLocalPacks,
 				this.monitorServerPacks,
@@ -366,6 +440,7 @@ public final class ResourcePackShieldConfig {
 
 	public record RuntimeSnapshot(
 			long revision,
+			long enforcementRevision,
 			boolean enabled,
 			boolean monitorLocalPacks,
 			boolean monitorServerPacks,
@@ -378,8 +453,10 @@ public final class ResourcePackShieldConfig {
 
 	public synchronized void resetToFactoryDefaults() {
 		long nextRevision = ConfigFactoryDefaults.nextRevision(this.revision);
+		long nextEnforcementRevision = ConfigFactoryDefaults.nextRevision(this.enforcementRevision);
 		ConfigFactoryDefaults.copyMutableFields(this, new ResourcePackShieldConfig());
 		this.revision = nextRevision;
+		this.enforcementRevision = nextEnforcementRevision;
 	}
 
 	public synchronized void save() {

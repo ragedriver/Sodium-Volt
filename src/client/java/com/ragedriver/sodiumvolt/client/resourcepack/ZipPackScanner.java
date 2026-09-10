@@ -269,8 +269,10 @@ public final class ZipPackScanner {
 			if (entries > policy.maximumEntries()) {
 				return CentralDirectoryMetadata.failed(ShieldReason.ENTRY_LIMIT);
 			}
+			// ZipFile locates the directory relative to END. Require that view to
+			// coincide with the declared offset; gaps permit conflicting directories.
 			if (centralOffset > fileSize || centralSize > fileSize - centralOffset
-					|| centralOffset + centralSize > tailOffset + end) {
+					|| centralOffset + centralSize != tailOffset + end) {
 				return CentralDirectoryMetadata.failed(ShieldReason.UNKNOWN_METADATA);
 			}
 			CentralEntry[] metadata = new CentralEntry[entries];
@@ -302,7 +304,11 @@ public final class ZipPackScanner {
 				int nameLength = reader.readUnsignedShort();
 				int extraLength = reader.readUnsignedShort();
 				int commentLength = reader.readUnsignedShort();
-				reader.skip(4L);
+				int diskStart = reader.readUnsignedShort();
+				reader.readUnsignedShort();
+				if (diskStart != 0) {
+					return CentralDirectoryMetadata.failed(ShieldReason.UNKNOWN_METADATA);
+				}
 				int unixMode = reader.readInt() >>> 16;
 				long localOffset = reader.readUnsignedInt();
 				if ((madeByHost == 3 || madeByHost == 19)

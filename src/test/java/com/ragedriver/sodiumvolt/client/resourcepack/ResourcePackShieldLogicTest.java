@@ -1,6 +1,8 @@
 package com.ragedriver.sodiumvolt.client.resourcepack;
 
 import com.ragedriver.sodiumvolt.client.config.ResourcePackShieldConfigTestSupport;
+import com.ragedriver.sodiumvolt.client.config.ResourcePackShieldConfig;
+import java.util.zip.ZipFile;
 import net.minecraft.server.packs.repository.PackSource;
 
 import java.io.ByteArrayInputStream;
@@ -36,6 +38,8 @@ public final class ResourcePackShieldLogicTest {
 	}
 
 	public static void main(String[] arguments) throws Exception {
+		testSessionSettingsLifetime();
+		testAmbiguousZipDirectories();
 		testDisabledTickSnapshotGate();
 		testPathPolicy();
 		testValidZipAndDirectory();
@@ -64,6 +68,143 @@ public final class ResourcePackShieldLogicTest {
 		testSourceScope();
 		ResourcePackShieldConfigTestSupport.run();
 		System.out.println("Resource-Pack Shield logic tests passed");
+	}
+
+	private static void testSessionSettingsLifetime() throws Exception {
+		Path directory = Files.createTempDirectory("shield-session-lifetime-");
+		var configDir = net.fabricmc.loader.impl.FabricLoaderImpl.class.getDeclaredField("configDir");
+		configDir.setAccessible(true);
+		Object loader = net.fabricmc.loader.api.FabricLoader.getInstance();
+		Object previousDirectory = configDir.get(loader);
+		configDir.set(loader, directory);
+		try {
+			ResourcePackShieldConfig config = ResourcePackShieldConfig.getInstance();
+			config.setResourcePackShieldEnabled(true);
+			config.setWriteSanitizedLocalReport(false);
+			var token = ResourcePackShieldEngine.beginResourceReload();
+			ResourcePackShieldSession session = testSession(config, token);
+			InputStream heldPng = session.wrap(new ByteArrayInputStream(new byte[24]),
+					ShieldedInputStream.ContentKind.PNG);
+			long epoch = config.enforcementRevision();
+			config.setShowInspectorStatistics(!config.isShowInspectorStatistics());
+			config.setShowTransitionNotifications(!config.isShowTransitionNotifications());
+			config.setWriteSanitizedLocalReport(false);
+			config.setMaximumEntries(config.getMaximumEntries());
+			ResourcePackShieldEngine.snapshotStatistics();
+			check(config.enforcementRevision() == epoch && !session.isRejected(),
+					"presentation and no-op changes preserve active policy");
+			check(session.wrap(new ByteArrayInputStream(new byte[0]),
+					ShieldedInputStream.ContentKind.OTHER) instanceof ShieldedInputStream,
+					"new suppliers remain guarded after presentation changes");
+			expectIo(heldPng::readAllBytes, "held PNG remains inspected after presentation changes");
+
+			var pendingToken = ResourcePackShieldEngine.beginResourceReload();
+			ResourcePackShieldSession pending = testSession(config, pendingToken);
+			check(!pendingToken.rejection().isRejected(), "new token starts clean");
+			AtomicInteger reads = new AtomicInteger();
+			InputStream held = pending.wrap(new InputStream() {
+				@Override public int read() { reads.incrementAndGet(); return 1; }
+			}, ShieldedInputStream.ContentKind.OTHER);
+			long consumed = pending.readBudget().consumedBytes();
+			config.setMaximumJsonDepth(16);
+			expectIo(held::read, "tightened policy retires held streams before delegate I/O");
+			expectIo(() -> held.skip(1), "retired streams cannot skip");
+			expectIo(held::available, "retired streams cannot query delegate availability");
+			check(reads.get() == 0 && consumed == pending.readBudget().consumedBytes(),
+					"retirement preserves budget and avoids delegate I/O");
+			check(pendingToken.rejection().isRejected(), "retirement rejects its original reload token");
+			ResourcePackShieldEngine.snapshotStatistics();
+			var initial = CompletableFuture.<net.minecraft.util.Unit>completedFuture(null);
+			check(ResourcePackShieldEngine.guardInitialReloadTask(initial, pendingToken) != initial,
+					"policy refresh must retain the original reload rejection");
+
+			ResourcePackShieldSession toggle = testSession(config, token);
+			config.setMonitorLocalPacks(false);
+			check(!toggle.isCurrent() && !toggle.isRejected(), "explicit scope disable permits bypass");
+			config.setMonitorLocalPacks(true);
+			check(toggle.isRejected(), "scope reenable cannot resurrect the old session");
+			ResourcePackShieldSession master = testSession(config, token);
+			config.setResourcePackShieldEnabled(false);
+			check(!master.isCurrent() && !master.isRejected(), "explicit master disable permits bypass");
+			config.setResourcePackShieldEnabled(true);
+			check(master.isRejected(), "master reenable cannot resurrect the old session");
+			ResourcePackShieldSession closed = testSession(config, token);
+			InputStream closedHeld = closed.wrap(new ByteArrayInputStream(new byte[]{1}),
+					ShieldedInputStream.ContentKind.OTHER);
+			closed.close();
+			check(closed.isRejected(), "closed session is fail closed");
+			expectIo(closedHeld::read, "closed session retires held streams");
+			ResourcePackShieldEngine.watchResourceReload(null, token);
+			ResourcePackShieldEngine.watchResourceReload(null, pendingToken);
+		} finally {
+			configDir.set(loader, previousDirectory);
+			deleteTree(directory);
+		}
+	}
+
+	private static ResourcePackShieldSession testSession(ResourcePackShieldConfig config,
+			ResourcePackShieldEngine.ReloadToken token) {
+		var snapshot = config.runtimeSnapshot();
+		return new ResourcePackShieldSession(ShieldSourceKind.LOCAL, snapshot.policy(),
+				snapshot.enforcementRevision(), token.controlGeneration(), token, null, List.of());
+	}
+
+	private static void testAmbiguousZipDirectories() throws Exception {
+		Path directory = Files.createTempDirectory("shield-ambiguous-zip-");
+		Path archive = directory.resolve("pack.zip");
+		try {
+			writeZip(archive, Map.of("a.txt", new byte[]{42}));
+			byte[] original = Files.readAllBytes(archive);
+			ByteBuffer source = ByteBuffer.wrap(original).order(ByteOrder.LITTLE_ENDIAN);
+			int end = original.length - 22;
+			int centralSize = source.getInt(end + 12);
+			int centralOffset = source.getInt(end + 16);
+			byte[] forged = new byte[original.length + 2 * centralSize];
+			System.arraycopy(original, 0, forged, centralSize, centralOffset);
+			System.arraycopy(original, centralOffset, forged, centralSize + centralOffset, centralSize);
+			System.arraycopy(original, centralOffset, forged, 2 * centralSize + centralOffset,
+					original.length - centralOffset);
+			ByteBuffer fields = ByteBuffer.wrap(forged).order(ByteOrder.LITTLE_ENDIAN);
+			int fake = centralSize + centralOffset;
+			fields.putShort(fake + 10, (short) 0);
+			fields.putInt(fake + 16, 0);
+			fields.putInt(fake + 20, 0);
+			fields.putInt(fake + 24, 0);
+			System.arraycopy("safe/".getBytes(StandardCharsets.UTF_8), 0, forged, fake + 46, 5);
+			fields.putInt(forged.length - 22 + 16, fake);
+			Files.write(archive, forged);
+			try (ZipFile zip = new ZipFile(archive.toFile())) {
+				check(zip.getEntry("a.txt") != null && zip.getEntry("safe/") == null,
+						"downstream reader chooses hidden real directory");
+				try (InputStream input = zip.getInputStream(zip.getEntry("a.txt"))) {
+					check(input.read() == 42, "hidden downstream resource is readable");
+				}
+			}
+			check(ZipPackScanner.scan(archive, policy(true)).reason() == ShieldReason.UNKNOWN_METADATA,
+					"conflicting end-relative directory rejected before vanilla opens it");
+
+			byte[] disk = original.clone();
+			ByteBuffer.wrap(disk).order(ByteOrder.LITTLE_ENDIAN).putShort(centralOffset + 34, (short) 1);
+			Files.write(archive, disk);
+			check(ZipPackScanner.scan(archive, policy(true)).reason() == ShieldReason.UNKNOWN_METADATA,
+					"entry from another disk is unsupported");
+			Files.write(archive, original);
+			check(ZipPackScanner.scan(archive, policy(true)).accepted(), "ordinary ZIP remains accepted");
+		} finally {
+			deleteTree(directory);
+		}
+	}
+
+	@FunctionalInterface
+	private interface IoAction { void run() throws IOException; }
+
+	private static void expectIo(IoAction action, String message) throws IOException {
+		try {
+			action.run();
+		} catch (IOException expected) {
+			return;
+		}
+		throw new AssertionError(message);
 	}
 
 	private static void testDisabledTickSnapshotGate() {

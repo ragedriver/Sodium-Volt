@@ -22,6 +22,8 @@ public final class AdaptiveBudgetControllerTest {
 		accountsForOneStrictParticleBudget();
 		usesNormalLoadUpperBoundFastPaths();
 		fusesReservedAndGeneralParticleSelection();
+		selectsUnrankedOccurrencesWithoutHeapOrReplay();
+		defersFallbackRankingUntilEligibleOverflow();
 		fallsBackExactlyForDuplicateGeneralIdentities();
 		recyclesBoundedSelectorEntries();
 		keepsRankStorageLazyUntilARealCandidate();
@@ -32,6 +34,9 @@ public final class AdaptiveBudgetControllerTest {
 		preservesIdentityMembershipAcrossResets();
 		coordinatesBlockEntityRankingWithoutASurvivorRescan();
 		preservesBlockEntityHandoffSemanticsAndLifecycle();
+		compactsDisplayStatesWithoutChangingOrderOrOccurrences();
+		boundsDisplayCompactionWorkUnderOverload();
+		boundsBlockEntityCompactionWorkUnderOverload();
 	}
 
 	private static void reducesAndRecoversWithHysteresis() {
@@ -157,6 +162,63 @@ public final class AdaptiveBudgetControllerTest {
 		require(GuardWorkloadBounds.statesFitBudget(128, 128)
 					&& !GuardWorkloadBounds.statesFitBudget(129, 128),
 				"display and BERP handoff bounds must use an inclusive budget boundary");
+	}
+
+	private static void selectsUnrankedOccurrencesWithoutHeapOrReplay() {
+		Object duplicate = new Object();
+		ParticleCandidate[] candidates = {
+				new ParticleCandidate(duplicate, true, 100.0D, 0),
+				new ParticleCandidate(duplicate, false, 1.0D, 1),
+				new ParticleCandidate(new Object(), true, 0.0D, 3),
+				new ParticleCandidate(new Object(), false, 0.0D, 7)
+		};
+		SpillAwareParticleSelector<Object> selector = new SpillAwareParticleSelector<>();
+		for (int budget = 0; budget <= 5; budget++) {
+			selector.begin(budget, false, false);
+			require(!selector.requiresRanking(), "unranked selection must not request distance calculations");
+			for (ParticleCandidate candidate : candidates) {
+				selector.offer(candidate.value(), candidate.special(), false, Double.NaN, candidate.originalIndex());
+			}
+			Set<Object> actual = newIdentitySet();
+			require(selector.finishFromSpill(actual, 2), "unranked duplicates must never require replay");
+			require(sameIdentityMembership(legacyParticleSelection(candidates, budget, false, false), actual, candidates),
+					"unranked selection must retain first budget occurrences rather than fill unique identities");
+			for (ParticleCandidate candidate : candidates) {
+				require(!selector.retainsReferenceForTesting(candidate.value()), "finalization must release unranked references");
+			}
+		}
+		require(selector.allocatedEntriesForTesting() <= 5, "unranked selection must allocate only a bounded reference array");
+		selector.begin(2, false, false);
+		selector.offer(duplicate, false, false, 0, 0);
+		selector.abort();
+		require(!selector.retainsReferenceForTesting(duplicate), "abort must clear unranked references");
+		selector.releaseStorage();
+		require(selector.allocatedEntriesForTesting() == 0, "disable must release unranked storage");
+	}
+
+	private static void defersFallbackRankingUntilEligibleOverflow() {
+		ParticleSelectionPrefix<Object> prefix = new ParticleSelectionPrefix<>();
+		Object first = new Object();
+		List<Integer> ranked = new ArrayList<>();
+		ParticleSelectionPrefix.CandidateConsumer<Object> consumer = (value, special, index) -> {
+			require(special == (index == 5), "prefix must preserve special metadata");
+			ranked.add(index);
+		};
+		prefix.begin(2);
+		prefix.offer(first, false, 1, consumer);
+		prefix.offer(first, true, 5, consumer);
+		require(ranked.isEmpty(), "eligible-under-budget workloads must never rank or calculate distances");
+		prefix.offer(new Object(), false, 8, consumer);
+		prefix.offer(new Object(), false, 11, consumer);
+		require(ranked.equals(List.of(1, 5, 8, 11)), "overflow must offer each eligible occurrence once in original order");
+		require(prefix.allocatedEntriesForTesting() == 2, "prefix storage must stay bounded by budget");
+		require(!prefix.retainsReferenceForTesting(first), "overflow must release buffered identities");
+		prefix.begin(2);
+		prefix.offer(first, false, 1, consumer);
+		prefix.clear();
+		require(!prefix.retainsReferenceForTesting(first), "under-budget completion must clear buffered identities");
+		prefix.releaseStorage();
+		require(prefix.allocatedEntriesForTesting() == 0, "disable must release prefix storage");
 	}
 
 	private static void fusesReservedAndGeneralParticleSelection() {
@@ -604,6 +666,112 @@ public final class AdaptiveBudgetControllerTest {
 				"a mismatched consumer list must clear references before standalone fallback");
 	}
 
+	private static void compactsDisplayStatesWithoutChangingOrderOrOccurrences() {
+		Object nonDisplay = new Object();
+		EqualValue first = new EqualValue(1);
+		EqualValue second = new EqualValue(1);
+		List<Object> input = List.of(nonDisplay, first, second, nonDisplay, first, second, nonDisplay);
+		for (int budget = 0; budget <= 5; budget++) {
+			List<Object> expected = new ArrayList<>();
+			int accepted = 0;
+			for (Object state : input) {
+				if (!(state instanceof EqualValue) || accepted++ < budget) {
+					expected.add(state);
+				}
+			}
+			ArrayList<Object> actual = new ArrayList<>(input);
+			int removed = DisplayEntityCompaction.limitFirst(actual, budget, state -> state instanceof EqualValue);
+			require(removed == input.size() - expected.size(), "first-k compaction must report exact rejections");
+			requireSameOccurrences(actual, expected);
+		}
+		for (int[] indices : List.of(new int[0], new int[]{2, 4}, new int[]{1, 2, 4, 5})) {
+			ArrayList<Object> actual = new ArrayList<>(input);
+			List<Object> expected = new ArrayList<>();
+			for (int index = 0; index < input.size(); index++) {
+				if (!(input.get(index) instanceof EqualValue) || Arrays.binarySearch(indices, index) >= 0) {
+					expected.add(input.get(index));
+				}
+			}
+			int removed = DisplayEntityCompaction.retainSelected(
+					actual, indices, indices.length, state -> state instanceof EqualValue);
+			require(removed == input.size() - expected.size(), "ranked compaction must report exact rejections");
+			requireSameOccurrences(actual, expected);
+		}
+		CountingArrayList<Object> empty = new CountingArrayList<>();
+		require(DisplayEntityCompaction.limitFirst(empty, 0, state -> true) == 0,
+				"empty first-k input must be a no-op");
+		require(DisplayEntityCompaction.retainSelected(empty, new int[0], 0, state -> true) == 0,
+				"empty ranked input must be a no-op");
+		require(empty.tailClears == 0 && empty.writes == 0, "empty inputs must not be mutated");
+	}
+
+	private static void boundsDisplayCompactionWorkUnderOverload() {
+		for (int count : new int[]{10_000, 80_000}) {
+			for (boolean ranked : new boolean[]{false, true}) {
+				CountingArrayList<RankedState> states = new CountingArrayList<>();
+				List<RankedState> expected = new ArrayList<>();
+				int budget = 256;
+				int[] indices = new int[budget];
+				for (int index = 0; index < budget; index++) {
+					indices[index] = (count - budget + index) * 2;
+				}
+				for (int index = 0; index < count * 2; index++) {
+					RankedState state = new RankedState(index);
+					states.add(state);
+					if (index % 2 != 0 || (ranked ? index >= indices[0] : index < budget * 2)) {
+						expected.add(state);
+					}
+				}
+				int removed = ranked
+						? DisplayEntityCompaction.retainSelected(states, indices, budget, state -> state.index() % 2 == 0)
+						: DisplayEntityCompaction.limitFirst(states, budget, state -> state.index() % 2 == 0);
+				require(removed == count - budget, "both display paths must enforce the exact display budget");
+				requireLinearCompaction(states, count * 2);
+				requireSameOccurrences(states, expected);
+			}
+		}
+	}
+
+	private static void boundsBlockEntityCompactionWorkUnderOverload() {
+		for (int count : new int[]{10_000, 80_000}) {
+			CountingArrayList<RankedState> states = new CountingArrayList<>();
+			List<RankedState> expected = new ArrayList<>();
+			BlockEntityGuardHandoff<RankedState> handoff = new BlockEntityGuardHandoff<>();
+			int budget = 256;
+			handoff.begin(count, budget, true, false);
+			for (int index = 0; index < count; index++) {
+				RankedState state = new RankedState(index);
+				states.add(state);
+				handoff.offer(state, false, false, count - index, index);
+				if (index >= count - budget) {
+					expected.add(state);
+				}
+			}
+			handoff.complete();
+			require(handoff.applyTo(states) == count - budget, "handoff must retain only the nearest budget");
+			requireLinearCompaction(states, count);
+			requireSameOccurrences(states, expected);
+			require(!handoff.retainsReferenceForTesting(expected.getFirst()),
+					"compaction must release handoff membership after consumption");
+		}
+	}
+
+	private static void requireLinearCompaction(CountingArrayList<?> states, int originalSize) {
+		require(states.visits() == originalSize, "compaction must read each original state exactly once");
+		require(states.writes <= originalSize, "compaction must perform at most one write per state");
+		require(states.individualRemovals == 0 && states.shiftedReferences == 0,
+				"overload must never trigger individual removals or shift an ArrayList suffix");
+		require(states.tailClears == 1, "overload must clear the discarded tail exactly once");
+	}
+
+	private static void requireSameOccurrences(List<?> actual, List<?> expected) {
+		require(actual.size() == expected.size(), "compaction must retain the expected number of states");
+		for (int index = 0; index < expected.size(); index++) {
+			require(actual.get(index) == expected.get(index),
+					"compaction must preserve exact occurrences and non-display order at " + index);
+		}
+	}
+
 	private static <T> Set<T> newIdentitySet() {
 		return Collections.newSetFromMap(new IdentityHashMap<>());
 	}
@@ -624,6 +792,36 @@ public final class AdaptiveBudgetControllerTest {
 
 	private static final class CountingArrayList<T> extends ArrayList<T> {
 		private int visits;
+		private int writes;
+		private int individualRemovals;
+		private int tailClears;
+		private long shiftedReferences;
+
+		@Override
+		public T get(int index) {
+			this.visits++;
+			return super.get(index);
+		}
+
+		@Override
+		public T set(int index, T value) {
+			this.writes++;
+			return super.set(index, value);
+		}
+
+		@Override
+		public T remove(int index) {
+			this.individualRemovals++;
+			this.shiftedReferences += this.size() - index - 1;
+			return super.remove(index);
+		}
+
+		@Override
+		protected void removeRange(int fromIndex, int toIndex) {
+			this.tailClears++;
+			this.shiftedReferences += this.size() - toIndex;
+			super.removeRange(fromIndex, toIndex);
+		}
 
 		private int visits() {
 			return this.visits;
