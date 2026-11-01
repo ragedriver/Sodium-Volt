@@ -295,6 +295,8 @@ public final class DirectoryCandidateValidator {
 			}
 			List<SecureDirectoryStream<Path>> opened = new ArrayList<>();
 			SecureDirectoryStream<Path> current = secureRoot;
+			SeekableByteChannel resultChannel = null;
+			Throwable operationFailure = null;
 			try {
 				for (int index = 0; index < components.size() - 1; index++) {
 					Path name = components.get(index).getFileName();
@@ -324,11 +326,11 @@ public final class DirectoryCandidateValidator {
 				this.secureOpenHook.beforeFinalOpen();
 				Path name = finalPath.getFileName();
 				try {
-					SeekableByteChannel channel = current.newByteChannel(
+					resultChannel = current.newByteChannel(
 							name,
 							Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
 					);
-					return SecureOpenResult.opened(Channels.newInputStream(channel));
+					return SecureOpenResult.opened(Channels.newInputStream(resultChannel));
 				} catch (NoSuchFileException exception) {
 					return SecureOpenResult.failed(ShieldReason.UNSAFE_PATH);
 				} catch (IOException exception) {
@@ -345,11 +347,61 @@ public final class DirectoryCandidateValidator {
 						return SecureOpenResult.failed(ShieldReason.UNSAFE_PATH);
 					}
 				}
+			} catch (IOException | RuntimeException | Error exception) {
+				operationFailure = exception;
+				throw exception;
 			} finally {
-				for (int index = opened.size() - 1; index >= 0; index--) {
+				closeOpenedDirectories(opened, resultChannel, operationFailure);
+			}
+		}
+
+		private static void closeOpenedDirectories(
+				List<SecureDirectoryStream<Path>> opened,
+				SeekableByteChannel resultChannel,
+				Throwable operationFailure
+		) throws IOException {
+			Throwable cleanupFailure = null;
+			for (int index = opened.size() - 1; index >= 0; index--) {
+				try {
 					opened.get(index).close();
+				} catch (IOException | RuntimeException | Error exception) {
+					cleanupFailure = mergeCleanupFailure(cleanupFailure, exception);
 				}
 			}
+			// A failed operation or directory cleanup prevents transferring the returned stream to its caller.
+			if (resultChannel != null && (operationFailure != null || cleanupFailure != null)) {
+				try {
+					resultChannel.close();
+				} catch (IOException | RuntimeException | Error exception) {
+					cleanupFailure = mergeCleanupFailure(cleanupFailure, exception);
+				}
+			}
+			if (cleanupFailure == null) {
+				return;
+			}
+			if (operationFailure != null) {
+				if (operationFailure != cleanupFailure) {
+					operationFailure.addSuppressed(cleanupFailure);
+				}
+				return;
+			}
+			if (cleanupFailure instanceof IOException exception) {
+				throw exception;
+			}
+			if (cleanupFailure instanceof RuntimeException exception) {
+				throw exception;
+			}
+			throw (Error) cleanupFailure;
+		}
+
+		private static Throwable mergeCleanupFailure(Throwable previous, Throwable next) {
+			if (previous == null) {
+				return next;
+			}
+			if (previous != next) {
+				previous.addSuppressed(next);
+			}
+			return previous;
 		}
 
 		private static List<Path> secureComponents(CandidatePlan candidate) {
@@ -466,6 +518,7 @@ public final class DirectoryCandidateValidator {
 
 			List<SecureDirectoryStream<Path>> opened = new ArrayList<>();
 			SecureDirectoryStream<Path> current = secureRoot;
+			Throwable operationFailure = null;
 			try {
 				for (int index = 0; index < components.size() - 1; index++) {
 					Path name = components.get(index).getFileName();
@@ -488,10 +541,11 @@ public final class DirectoryCandidateValidator {
 				// explicit symlink/type diagnostics on providers whose secure
 				// attribute view follows the final link despite NOFOLLOW_LINKS.
 				return classifyFreshPath(components.getLast(), expectedType);
+			} catch (IOException | RuntimeException | Error exception) {
+				operationFailure = exception;
+				throw exception;
 			} finally {
-				for (int index = opened.size() - 1; index >= 0; index--) {
-					opened.get(index).close();
-				}
+				closeOpenedDirectories(opened, null, operationFailure);
 			}
 		}
 
@@ -749,19 +803,22 @@ public final class DirectoryCandidateValidator {
 			hook.afterRootValidation();
 			DirectoryStream<Path> opened = Files.newDirectoryStream(primaryRoot);
 			if (opened instanceof SecureDirectoryStream<Path> secure) {
+				// The enclosing operation's finally block must own the handle before attribute queries can fail.
+				this.secureRoot = secure;
 				BasicFileAttributes pinned = secure.getFileAttributeView(
 						java.nio.file.attribute.BasicFileAttributeView.class
 				).readAttributes();
 				if (expectedKey == null || pinned.fileKey() == null
 						) {
+					this.secureRoot = null;
 					secure.close();
 					return ShieldReason.NONE;
 				}
 				if (!expectedKey.equals(pinned.fileKey())) {
+					this.secureRoot = null;
 					secure.close();
 					return ShieldReason.UNSAFE_PATH;
 				}
-				this.secureRoot = secure;
 			} else {
 				opened.close();
 			}

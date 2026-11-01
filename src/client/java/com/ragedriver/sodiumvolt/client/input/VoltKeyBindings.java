@@ -6,7 +6,6 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.resources.Identifier;
-import org.lwjgl.glfw.GLFW;
 
 public final class VoltKeyBindings {
 	private static final VoltInspectorConfig INSPECTOR_CONFIG = VoltInspectorConfig.getInstance();
@@ -16,8 +15,8 @@ public final class VoltKeyBindings {
 	private static final KeyMapping TOGGLE_INSPECTOR_HUD = KeyMappingHelper.registerKeyMapping(
 			new KeyMapping(
 					"key.sodium-volt.toggle_volt_inspector_hud",
-					InputConstants.Type.KEYSYM,
-					GLFW.GLFW_KEY_LEFT_BRACKET,
+					InputConstants.Type.KEYBOARD,
+					InputConstants.KEY_LBRACKET,
 					VOLT_BINDS_CATEGORY
 			)
 	);

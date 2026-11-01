@@ -270,11 +270,13 @@ public final class AdaptivePerformanceController {
 
 	private static int effectiveTarget(Minecraft minecraft) {
 		Options options = minecraft.options;
+		var videoMode = minecraft.getWindow().getActiveVideoMode();
+		float refreshRate = videoMode == null ? 0.0F : videoMode.getRefreshRate();
 		return ApcControllerLogic.effectiveTargetFps(
 				CONFIG.getTargetFps(),
 				options.framerateLimit().get(),
 				options.enableVsync().get(),
-				minecraft.getWindow().getRefreshRate()
+				Float.isFinite(refreshRate) ? Math.max(0, Math.round(refreshRate)) : 0
 		);
 	}
 

@@ -18,6 +18,7 @@ public abstract class DebugScreenOverlayMixin {
 			GuiGraphicsExtractor graphics,
 			List<String> lines,
 			boolean alignLeft,
+			int maxWidth,
 			CallbackInfo callbackInfo
 	) {
 		SodiumVoltDebugLine.insertIfDebugVisible(

@@ -41,13 +41,24 @@ dependencyLocking {
 def fabricApiMinimumVersion = project.fabric_api_version.split('\\+', 2)[0]
 def expectedModVersion = project.version.toString()
 def expectedFabricApiPredicate = ">=${fabricApiMinimumVersion}".toString()
+def expectedMinecraftPredicate = "~${project.minecraft_version}".toString()
+def expectedSodiumPredicate = project.sodium_version.toString()
+// Runtime compatibility remains open to newer loaders, independently of a test launch override.
+def minimumLoaderVersion = '0.19.5'
+def expectedLoaderPredicate = ">=${minimumLoaderVersion}".toString()
+def metadataProperties = [
+	version: expectedModVersion,
+	fabricApiMinimumVersion: fabricApiMinimumVersion,
+	minecraftPredicate: expectedMinecraftPredicate,
+	sodiumPredicate: expectedSodiumPredicate,
+	loaderPredicate: expectedLoaderPredicate
+]
 
 processResources {
-	inputs.property "version", expectedModVersion
-	inputs.property "fabricApiMinimumVersion", fabricApiMinimumVersion
+	inputs.properties metadataProperties
 
 	filesMatching("fabric.mod.json") {
-		expand "version": expectedModVersion, "fabricApiMinimumVersion": fabricApiMinimumVersion
+		expand metadataProperties
 	}
 }
 
@@ -60,6 +71,9 @@ tasks.register("verifyFabricModMetadata") {
 	inputs.file processedFabricMod
 	inputs.property "expectedModVersion", expectedModVersion
 	inputs.property "expectedFabricApiPredicate", expectedFabricApiPredicate
+	inputs.property "expectedMinecraftPredicate", expectedMinecraftPredicate
+	inputs.property "expectedSodiumPredicate", expectedSodiumPredicate
+	inputs.property "expectedLoaderPredicate", expectedLoaderPredicate
 
 	doLast {
 		def metadata = new groovy.json.JsonSlurper().parse(processedFabricMod.get().asFile)
@@ -70,10 +84,26 @@ tasks.register("verifyFabricModMetadata") {
 		if (metadata.depends?.get("fabric-api") != expectedFabricApiPredicate) {
 			throw new GradleException("fabric.mod.json fabric-api dependency '${metadata.depends?.get("fabric-api")}' does not match '${expectedFabricApiPredicate}'")
 		}
+		[minecraft: expectedMinecraftPredicate, sodium: expectedSodiumPredicate, fabricloader: expectedLoaderPredicate].each { id, expected ->
+			if (metadata.depends?.get(id) != expected) {
+				throw new GradleException("fabric.mod.json ${id} dependency '${metadata.depends?.get(id)}' does not match '${expected}'")
+			}
+		}
 	}
 }
 
 tasks.check.dependsOn tasks.verifyFabricModMetadata
+
+tasks.register("versionCompatibilityTest", JavaExec) {
+	group = "verification"
+	description = "Checks Fabric version predicates against supported and rejected dependency versions."
+	dependsOn tasks.testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = "com.ragedriver.sodiumvolt.client.config.VersionCompatibilityTest"
+}
+
+tasks.check.dependsOn tasks.versionCompatibilityTest
+tasks.test.dependsOn tasks.versionCompatibilityTest
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25

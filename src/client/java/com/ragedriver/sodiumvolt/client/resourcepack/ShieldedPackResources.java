@@ -1,7 +1,7 @@
 package com.ragedriver.sodiumvolt.client.resourcepack;
 
 import net.minecraft.resources.Identifier;
-import net.minecraft.server.packs.AbstractPackResources;
+import net.minecraft.server.packs.AbstractPackMetadataResources;
 import net.minecraft.server.packs.PackLocationInfo;
 import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.PackType;
@@ -9,6 +9,8 @@ import net.minecraft.server.packs.metadata.MetadataSectionType;
 import net.minecraft.server.packs.repository.KnownPack;
 import net.minecraft.server.packs.resources.IoSupplier;
 import net.minecraft.server.packs.resources.ResourceMetadata;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -17,11 +19,12 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+@NullMarked
 final class ShieldedPackResources implements PackResources {
 	private final PackResources delegate;
 	private final ResourcePackShieldSession session;
 	private final AtomicBoolean closed = new AtomicBoolean();
-	private volatile ResourceMetadata metadata;
+	private volatile @Nullable ResourceMetadata metadata;
 
 	ShieldedPackResources(PackResources delegate, ResourcePackShieldSession session) {
 		this.delegate = delegate;
@@ -29,7 +32,7 @@ final class ShieldedPackResources implements PackResources {
 	}
 
 	@Override
-	public IoSupplier<InputStream> getRootResource(String... elements) {
+	public @Nullable IoSupplier<InputStream> getRootResource(String... elements) {
 		String logicalPath = String.join("/", elements);
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
 			if (this.session.isRejected()
@@ -46,7 +49,7 @@ final class ShieldedPackResources implements PackResources {
 	}
 
 	@Override
-	public IoSupplier<InputStream> getResource(PackType type, Identifier identifier) {
+	public @Nullable IoSupplier<InputStream> getResource(PackType type, Identifier identifier) {
 		String logicalPath = type.getDirectory() + "/" + identifier.getNamespace()
 				+ "/" + identifier.getPath();
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
@@ -118,7 +121,7 @@ final class ShieldedPackResources implements PackResources {
 	}
 
 	@Override
-	public <T> T getMetadataSection(MetadataSectionType<T> type) throws IOException {
+	public <T> @Nullable T getMetadataSection(MetadataSectionType<T> type) throws IOException {
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
 			if (this.session.isRejected() || this.session.validateArchiveSource(lease)) {
 				return null;
@@ -128,7 +131,7 @@ final class ShieldedPackResources implements PackResources {
 				synchronized (this) {
 					current = this.metadata;
 					if (current == null) {
-						current = AbstractPackResources.loadMetadata(this);
+						current = AbstractPackMetadataResources.loadMetadata(this);
 						this.metadata = current;
 					}
 				}
@@ -159,8 +162,8 @@ final class ShieldedPackResources implements PackResources {
 		}
 	}
 
-	private IoSupplier<InputStream> wrapSupplier(
-			IoSupplier<InputStream> supplier,
+	private @Nullable IoSupplier<InputStream> wrapSupplier(
+			@Nullable IoSupplier<InputStream> supplier,
 			String logicalPath,
 			boolean primaryOnly
 	) {

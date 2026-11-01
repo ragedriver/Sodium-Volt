@@ -1,7 +1,8 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
-import com.mojang.blaze3d.opengl.DirectStateAccess;
-import com.mojang.blaze3d.opengl.GlBuffer;
+import com.mojang.renderpearl.backend.opengl.DirectStateAccess;
+import com.mojang.renderpearl.backend.opengl.GlBuffer;
+import com.mojang.renderpearl.backend.opengl.GlHeuristics;
 import com.ragedriver.sodiumvolt.client.performance.VramAllocationTracker;
 import com.ragedriver.sodiumvolt.client.performance.VramTrackedResource;
 import org.spongepowered.asm.mixin.Mixin;
@@ -12,11 +13,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(GlBuffer.Direct.class)
 public abstract class GlDirectBufferVramMixin {
 	@Inject(
-			method = "<init>(Lcom/mojang/blaze3d/opengl/DirectStateAccess;IJIZ)V",
+			method = "<init>(Lcom/mojang/renderpearl/backend/opengl/GlHeuristics;Lcom/mojang/renderpearl/backend/opengl/DirectStateAccess;IJIZ)V",
 			at = @At("RETURN"),
 			require = 1
 	)
 	private void sodiumVolt$trackSuccessfulBufferAllocation(
+			GlHeuristics heuristics,
 			DirectStateAccess directStateAccess,
 			int usage,
 			long size,

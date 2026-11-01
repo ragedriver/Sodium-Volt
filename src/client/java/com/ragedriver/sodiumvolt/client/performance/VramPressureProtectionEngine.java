@@ -1,8 +1,8 @@
 package com.ragedriver.sodiumvolt.client.performance;
 
-import com.mojang.blaze3d.systems.DeviceInfo;
-import com.mojang.blaze3d.systems.DeviceType;
-import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.renderpearl.api.device.DeviceInfo;
+import com.mojang.renderpearl.api.device.DeviceType;
+import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.ragedriver.sodiumvolt.SodiumVolt;
 import com.ragedriver.sodiumvolt.client.config.VoltPerformanceConfig;

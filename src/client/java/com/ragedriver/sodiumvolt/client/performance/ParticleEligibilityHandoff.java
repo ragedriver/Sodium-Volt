@@ -3,7 +3,7 @@ package com.ragedriver.sodiumvolt.client.performance;
 /**
  * Bounded, reusable handoff containing the VAPS-approved particle candidates
  * that Volt Guard would otherwise rediscover by walking the raw particle
- * queues. A handoff is usable only after {@link #complete()}.
+ * queues. A handoff is usable only when {@link #isComplete()} returns true.
  */
 public final class ParticleEligibilityHandoff<T> {
 	private final Object[] candidates;

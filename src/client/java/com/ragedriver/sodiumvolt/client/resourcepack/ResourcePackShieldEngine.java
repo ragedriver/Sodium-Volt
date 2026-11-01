@@ -9,10 +9,7 @@ import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.repository.Pack;
 import net.minecraft.util.Unit;
 
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;

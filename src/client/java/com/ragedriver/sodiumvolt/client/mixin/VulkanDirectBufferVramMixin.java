@@ -1,7 +1,7 @@
 package com.ragedriver.sodiumvolt.client.mixin;
 
-import com.mojang.blaze3d.vulkan.VulkanDevice;
-import com.mojang.blaze3d.vulkan.VulkanGpuBuffer;
+import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
+import com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer;
 import com.ragedriver.sodiumvolt.client.performance.VramAllocationTracker;
 import com.ragedriver.sodiumvolt.client.performance.VramTrackedResource;
 import org.spongepowered.asm.mixin.Mixin;
@@ -14,7 +14,7 @@ import java.util.function.Supplier;
 @Mixin(VulkanGpuBuffer.Direct.class)
 public abstract class VulkanDirectBufferVramMixin {
 	@Inject(
-			method = "<init>(Lcom/mojang/blaze3d/vulkan/VulkanDevice;Ljava/util/function/Supplier;IJZ)V",
+			method = "<init>(Lcom/mojang/renderpearl/backend/vulkan/VulkanDevice;Ljava/util/function/Supplier;IJZ)V",
 			at = @At("RETURN"),
 			require = 1
 	)

@@ -3,6 +3,7 @@ package com.ragedriver.sodiumvolt.client.profile;
 import com.ragedriver.sodiumvolt.SodiumVolt;
 import com.ragedriver.sodiumvolt.client.config.ProfilesConfig;
 import com.ragedriver.sodiumvolt.client.performance.AdaptivePerformanceController;
+import com.ragedriver.sodiumvolt.client.recovery.VoltRecoveryEngine;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
@@ -56,7 +57,8 @@ public final class PerformanceProfileEngine {
 		}
 		ProfilesConfig.RuntimeControl control = CONFIG.runtimeControl();
 		boolean configuredEnabled = control.enabled();
-		if (!ProfileTickGate.requiresUpdate(configuredEnabled, observedEnabled)) {
+		if (!ProfileTickGate.requiresUpdate(
+				configuredEnabled, observedEnabled, VoltRecoveryEngine.ownsGraphicsOptions())) {
 			return;
 		}
 		try {
@@ -73,6 +75,9 @@ public final class PerformanceProfileEngine {
 	public static synchronized boolean captureCurrentSinglePlayerProfile(
 			Minecraft minecraft
 	) {
+		if (VoltRecoveryEngine.ownsGraphicsOptions()) {
+			return false;
+		}
 		Context context = currentWorldContext(minecraft);
 		if (context == null || context.kind != ContextKind.SINGLE_PLAYER) {
 			return false;
@@ -86,6 +91,9 @@ public final class PerformanceProfileEngine {
 	}
 
 	public static synchronized boolean captureCurrentServerProfile(Minecraft minecraft) {
+		if (VoltRecoveryEngine.ownsGraphicsOptions()) {
+			return false;
+		}
 		Context context = currentWorldContext(minecraft);
 		if (context == null || context.kind != ContextKind.SERVER) {
 			return false;
@@ -371,7 +379,7 @@ public final class PerformanceProfileEngine {
 	private static void onClientStopping(Minecraft minecraft) {
 		synchronized (PerformanceProfileEngine.class) {
 			IDENTITY_CACHE.clear();
-			if (lastApplied != null) {
+			if (lastApplied != null && !VoltRecoveryEngine.ownsGraphicsOptions()) {
 				try {
 					restoreGlobalDefaults(minecraft, true);
 				} catch (RuntimeException | LinkageError exception) {

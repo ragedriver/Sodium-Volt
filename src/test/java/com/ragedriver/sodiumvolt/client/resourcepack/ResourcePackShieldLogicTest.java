@@ -37,7 +37,77 @@ public final class ResourcePackShieldLogicTest {
 	private ResourcePackShieldLogicTest() {
 	}
 
+	private static void testOpenedResourceStreamOwnership() {
+		class Resource implements AutoCloseable {
+			int closes;
+			final Resource delegate;
+			Resource() { this.delegate = null; }
+			Resource(Resource delegate) { this.delegate = delegate; }
+			@Override public void close() {
+				this.closes++;
+				if (this.delegate != null) this.delegate.close();
+			}
+		}
+		Resource first = new Resource();
+		Resource second = new Resource();
+		Resource wrapped = new Resource(first);
+		AtomicInteger sourceCloses = new AtomicInteger();
+		RuntimeException failure = new RuntimeException("guard failure");
+		try {
+			ShieldResourceStream.guard(java.util.stream.Stream.of(first, second).onClose(sourceCloses::incrementAndGet), resource -> {
+				if (resource == second) throw failure;
+				return wrapped;
+			});
+			throw new AssertionError("A failed guard must fail resource opening");
+		} catch (RuntimeException expected) {
+			if (expected != failure) throw expected;
+		}
+		if (first.closes != 1 || second.closes != 1 || wrapped.closes != 1 || sourceCloses.get() != 1) {
+			throw new AssertionError("Partial protection must close wrappers and remaining delegates exactly once");
+		}
+		Resource owned = new Resource();
+		AtomicInteger guards = new AtomicInteger();
+		try (var protectedResources = ShieldResourceStream.guard(java.util.stream.Stream.of(owned), resource -> {
+			guards.incrementAndGet();
+			return resource;
+		})) {
+			if (guards.get() != 1 || owned.closes != 0 || protectedResources.findFirst().orElseThrow() != owned) {
+				throw new AssertionError("Guarding must be eager and transfer resource ownership to the caller");
+			}
+		}
+		if (owned.closes != 0) throw new AssertionError("Closing a supplier stream must not close transferred packs");
+		Resource closeFailureResource = new Resource();
+		Resource closeFailureWrapper = new Resource(closeFailureResource);
+		try {
+			ShieldResourceStream.guard(java.util.stream.Stream.of(closeFailureResource).onClose(() -> { throw failure; }), resource -> closeFailureWrapper);
+			throw new AssertionError("A source close failure must abort resource opening");
+		} catch (RuntimeException expected) {
+			if (expected != failure) throw expected;
+		}
+		if (closeFailureWrapper.closes != 1 || closeFailureResource.closes != 1) {
+			throw new AssertionError("Source close failure must release wrapper ownership");
+		}
+		Resource repeated = new Resource();
+		Resource repeatedWrapper = new Resource(repeated);
+		AtomicInteger repeatedGuards = new AtomicInteger();
+		try {
+			ShieldResourceStream.guard(java.util.stream.Stream.of(repeated, repeated).onClose(() -> { throw failure; }), resource -> {
+				repeatedGuards.incrementAndGet();
+				return repeatedWrapper;
+			});
+			throw new AssertionError("Expected source close failure");
+		} catch (RuntimeException expected) {
+			if (expected != failure) throw expected;
+		}
+		if (repeated.closes != 1 || repeatedWrapper.closes != 1 || repeatedGuards.get() != 1) {
+			throw new AssertionError("Repeated resource identities must share one wrapper and close exactly once");
+		}
+	}
+
 	public static void main(String[] arguments) throws Exception {
+		testOpenedResourceStreamOwnership();
+		DirectoryPinnedRootFailureTestSupport.run();
+		DirectoryChildCloseTestSupport.run();
 		testSessionSettingsLifetime();
 		testAmbiguousZipDirectories();
 		testDisabledTickSnapshotGate();

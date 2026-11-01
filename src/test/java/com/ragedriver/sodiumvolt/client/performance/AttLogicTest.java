@@ -14,6 +14,7 @@ public final class AttLogicTest {
 	}
 
 	public static void main(String[] arguments) {
+		testAtlasTextureEligibility();
 		testIdentifiersAndJson();
 		testCollidingIdentifiers();
 		testDisabledExemptionLoadingAndToggle();
@@ -34,6 +35,20 @@ public final class AttLogicTest {
 		testFailOpenRetryAndSaturation();
 		testExactCriticalTextures();
 		System.out.println("ATT logic tests passed");
+	}
+
+	private static void testAtlasTextureEligibility() {
+		check(AttAtlasPolicy.isWorldAtlasTexture(Identifier.parse("minecraft:textures/atlas/blocks.png")),
+				"block atlas textures remain eligible for world animation throttling");
+		check(AttAtlasPolicy.isWorldAtlasTexture(Identifier.parse("minecraft:textures/atlas/particles.png")),
+				"particle atlas textures remain eligible for world animation throttling");
+		check(!AttAtlasPolicy.isWorldAtlasTexture(Identifier.parse("minecraft:blocks")),
+				"atlas definition IDs must not be confused with texture IDs");
+		check(!AttAtlasPolicy.isWorldAtlasTexture(Identifier.parse("minecraft:textures/atlas/gui.png"))
+				&& !AttAtlasPolicy.isWorldAtlasTexture(Identifier.parse("minecraft:textures/atlas/items.png"))
+				&& !AttAtlasPolicy.isWorldAtlasTexture(Identifier.parse("custom:textures/atlas/blocks.png"))
+				&& !AttAtlasPolicy.isWorldAtlasTexture(null),
+				"interface, item, custom, and unknown atlases stay protected");
 	}
 
 	private static void testIdentifiersAndJson() {

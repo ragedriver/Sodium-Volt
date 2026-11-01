@@ -339,7 +339,7 @@ public final class GpuTimeoutWatchdogEngine {
 		}
 		if (settings.ignoreUnfocusedMinimized()) {
 			Window window = minecraft.getWindow();
-			return window.isMinimized() || window.isIconified() || !window.isFocused();
+			return window.isIconified() || !window.isFocused();
 		}
 		return false;
 	}

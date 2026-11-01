@@ -150,6 +150,11 @@ public final class VoltRecoveryEngine {
 		return statistics;
 	}
 
+	/** Client-thread ownership lasts until restoration, including retained stable-session backups. */
+	public static boolean ownsGraphicsOptions() {
+		return state.ownsGraphicsOptions();
+	}
+
 	private static void startMonitoring(Minecraft minecraft, boolean allowForceForThisLaunch) {
 		RecoveryPersistentState loaded = RecoveryStateStore.load();
 		boolean stagedForceFromPriorLaunch = loaded.forceRequestStaged();

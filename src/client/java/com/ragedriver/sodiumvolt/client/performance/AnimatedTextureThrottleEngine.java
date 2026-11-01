@@ -10,7 +10,6 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.resource.v1.ResourceLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.SpriteContents;
-import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.PackType;
@@ -152,8 +151,7 @@ public final class AnimatedTextureThrottleEngine {
 			boolean visible = visibility.sodiumVolt$visibilityGeneration()
 					== completedVisibilityGeneration && completedVisibilityGeneration != 0;
 			boolean interfaceProtected = cycle.keepInterfaceAtlasesFullSpeed()
-					&& !TextureAtlas.LOCATION_BLOCKS.equals(cycle.atlasLocation())
-					&& !TextureAtlas.LOCATION_PARTICLES.equals(cycle.atlasLocation());
+					&& !AttAtlasPolicy.isWorldAtlasTexture(cycle.atlasLocation());
 			boolean screenProtected = cycle.keepInterfaceAtlasesFullSpeed()
 					&& active
 					&& cycle.screenOpen();

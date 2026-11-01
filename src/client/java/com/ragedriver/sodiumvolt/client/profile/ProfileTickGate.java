@@ -6,8 +6,10 @@ final class ProfileTickGate {
 
 	static boolean requiresUpdate(
 			boolean configuredEnabled,
-			boolean observedEnabled
+			boolean observedEnabled,
+			boolean recoveryOwnsGraphics
 	) {
-		return configuredEnabled || observedEnabled;
+		// Keep the previous context pending; evaluate the current world after Recovery releases ownership.
+		return !recoveryOwnsGraphics && (configuredEnabled || observedEnabled);
 	}
 }

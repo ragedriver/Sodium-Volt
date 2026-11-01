@@ -4,6 +4,7 @@ import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.ragedriver.sodiumvolt.client.performance.AdaptivePerformanceController;
 import com.ragedriver.sodiumvolt.client.performance.AnimatedTextureThrottleEngine;
+import com.ragedriver.sodiumvolt.client.performance.AttAtlasPolicy;
 import com.ragedriver.sodiumvolt.client.performance.AttAnimationCycleContext;
 import com.ragedriver.sodiumvolt.client.performance.AttAnimationStateExtension;
 import com.ragedriver.sodiumvolt.client.performance.AttMappingFailOpenLatch;
@@ -149,8 +150,7 @@ public abstract class TextureAtlasAnimationMixin {
 	private boolean sodiumVolt$shouldSkipLegacyApcCycle() {
 		TextureAtlas atlas = (TextureAtlas) (Object) this;
 		Identifier location = atlas.location();
-		boolean eligibleAtlas = TextureAtlas.LOCATION_BLOCKS.equals(location)
-				|| TextureAtlas.LOCATION_PARTICLES.equals(location);
+		boolean eligibleAtlas = AttAtlasPolicy.isWorldAtlasTexture(location);
 		if (!eligibleAtlas || !AdaptivePerformanceController.shouldThrottleAtlasAnimations()) {
 			this.sodiumVolt$animationThrottlePhase = 0;
 			return false;

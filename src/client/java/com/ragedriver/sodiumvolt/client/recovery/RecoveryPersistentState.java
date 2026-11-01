@@ -91,6 +91,10 @@ public record RecoveryPersistentState(
 		);
 	}
 
+	public boolean ownsGraphicsOptions() {
+		return this.hasBackup && this.profileApplied;
+	}
+
 	public RecoveryPersistentState clean() {
 		return EMPTY;
 	}

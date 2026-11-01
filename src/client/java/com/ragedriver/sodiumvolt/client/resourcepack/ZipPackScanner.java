@@ -1,5 +1,7 @@
 package com.ragedriver.sodiumvolt.client.resourcepack;
 
+import org.jetbrains.annotations.NotNull;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.FileChannel;
@@ -552,7 +554,7 @@ public final class ZipPackScanner {
 		}
 
 		@Override
-		public int read(byte[] bytes, int offset, int length) throws IOException {
+		public int read(byte @NotNull [] bytes, int offset, int length) throws IOException {
 			int read = this.delegate.read(bytes, offset, length);
 			if (read < 0) {
 				verify();
@@ -599,7 +601,7 @@ public final class ZipPackScanner {
 		}
 
 		@Override
-		public int read(byte[] bytes, int offset, int length) throws IOException {
+		public int read(byte @NotNull [] bytes, int offset, int length) throws IOException {
 			java.util.Objects.checkFromIndexSize(offset, length, bytes.length);
 			if (length == 0) {
 				return 0;

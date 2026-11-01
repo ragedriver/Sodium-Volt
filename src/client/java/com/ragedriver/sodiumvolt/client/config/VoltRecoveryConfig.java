@@ -91,7 +91,9 @@ public final class VoltRecoveryConfig {
 
 	public void setVoltRecoveryEnabled(boolean value) {
 		this.voltRecoveryEnabled = value;
-		this.wasEverEnabled |= value;
+		if (value) {
+			this.wasEverEnabled = true;
+		}
 	}
 
 	public boolean isDetectUncleanSessions() {

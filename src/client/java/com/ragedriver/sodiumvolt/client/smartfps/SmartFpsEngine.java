@@ -110,7 +110,7 @@ public final class SmartFpsEngine {
 		updatePowerPolling(nowNanos, settings);
 
 		Window window = minecraft.getWindow();
-		boolean minimized = window.isMinimized() || window.isIconified();
+		boolean minimized = window.isIconified();
 		boolean focused = window.isFocused();
 		SmartFpsPowerSnapshot currentPower = power;
 		int result = POLICY.evaluate(

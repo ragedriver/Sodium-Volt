@@ -12,7 +12,6 @@ import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
 import java.io.Reader;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;

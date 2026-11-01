@@ -1,5 +1,21 @@
 # Sodium Volt Changelog
 
+## 1.0.4+mc26.3
+
+### Minecraft 26.3 migration
+
+- Target Minecraft 26.3, Sodium Fabric 0.9.2+mc26.3, and Fabric API 0.165.0+26.3.
+- Require Fabric Loader 0.19.5 or newer, with no Loader upper version bound.
+- Migrate key bindings and window-state handling to Minecraft's SDL input implementation.
+- Adapt VRAM accounting and GPU inspection to RenderPearl and the updated buffer constructors.
+- Update privacy screenshot capture, first-person hand rendering, and debug overlay hooks.
+- Hide the separately rendered three-dimensional debug crosshair during privacy captures when debug or gameplay overlays are hidden.
+- Connect block-entity budgeting and extraction caching to Sodium's actual block-entity rendering path.
+- Defer automatic context profiles and profile capture while Volt Recovery owns a safe graphics profile, preserving recovery settings until restoration.
+- Preserve Resource-Pack Shield protection with the new resource supplier streams, including cleanup after opening failures.
+- Verify generated dependency metadata and supported/rejected version boundaries during `check`.
+- Update the Gradle wrapper to 9.6.0 with its pinned distribution checksum.
+
 ## 1.0.3+mc26.2
 
 ### Performance Improvements

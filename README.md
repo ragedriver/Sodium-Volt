@@ -56,7 +56,13 @@ Sodium Volt is a Fabric addon that expands Sodium with extra performance, securi
 
 ## Requirements
 
-- A computer with minecraft and sodium
+- Minecraft **26.3** (26.3.x)
+- Sodium Fabric **0.9.2+mc26.3**
+- Fabric API **0.165.0+26.3** or newer compatible release
+- Fabric Loader **0.19.5 or newer**
+- Java **25 or newer**
+
+The development build uses Loader 0.19.5 as its minimum compatibility baseline.
 
 ## License
 

@@ -50,7 +50,7 @@ public abstract class MinecraftPrivacyScreenshotMixin {
 			method = "renderFrame(Z)V",
 			at = @At(
 					value = "INVOKE",
-					target = "Lnet/minecraft/client/renderer/GameRenderer;render(Lnet/minecraft/client/DeltaTracker;Z)V",
+					target = "Lnet/minecraft/client/renderer/GameRenderer;render()V",
 					shift = At.Shift.AFTER
 			)
 	)

@@ -32,10 +32,10 @@
 		}
 	],
 	"depends": {
-		"fabricloader": ">=0.19.3",
-		"minecraft": "~26.2",
+		"fabricloader": "${loaderPredicate}",
+		"minecraft": "${minecraftPredicate}",
 		"java": ">=25",
 		"fabric-api": ">=${fabricApiMinimumVersion}",
-		"sodium": ">=0.9.1 <0.10.0"
+		"sodium": "${sodiumPredicate}"
 	}
 }

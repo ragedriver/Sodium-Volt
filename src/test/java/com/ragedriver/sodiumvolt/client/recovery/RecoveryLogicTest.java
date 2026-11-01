@@ -1,6 +1,7 @@
 package com.ragedriver.sodiumvolt.client.recovery;
 
 import com.ragedriver.sodiumvolt.client.performance.InspectorStatisticsDemand;
+import com.ragedriver.sodiumvolt.client.config.VoltRecoveryConfigTestSupport;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -14,6 +15,7 @@ public final class RecoveryLogicTest {
 	}
 
 	public static void main(String[] arguments) throws Exception {
+		VoltRecoveryConfigTestSupport.run();
 		testFirstCleanSession();
 		testUncleanThreshold();
 		testForceOneShotStaging();
@@ -308,6 +310,8 @@ public final class RecoveryLogicTest {
 				true, 2, 1, true, false, true, true, original, safe
 		);
 		RecoveryPersistentState retained = active.stable(true);
+		check(active.ownsGraphicsOptions() && retained.ownsGraphicsOptions(),
+				"active and retained stable Recovery profiles must defer automatic context profiles");
 		check(RecoverySessionLogic.suspendApc(
 						retained.recoveryActive(),
 						retained.hasBackup() && retained.profileApplied(),
@@ -318,6 +322,8 @@ public final class RecoveryLogicTest {
 				"a retained stable profile must not retain the transient Recovery FPS cap");
 
 		RecoveryPersistentState restored = active.stable(false);
+		check(!restored.ownsGraphicsOptions() && !active.clean().ownsGraphicsOptions(),
+				"restoration and clean release allow pending context profiles to resume");
 		check(!RecoverySessionLogic.suspendApc(
 						restored.recoveryActive(),
 						restored.hasBackup() && restored.profileApplied(),
@@ -334,6 +340,8 @@ public final class RecoveryLogicTest {
 		RecoveryPersistentState unappliedBackup = new RecoveryPersistentState(
 				true, 2, 1, false, false, true, false, original, safe
 		);
+		check(!unappliedBackup.ownsGraphicsOptions(),
+				"an unapplied backup must not block context profiles or capture");
 		check(!RecoverySessionLogic.suspendApc(
 						unappliedBackup.recoveryActive(),
 						unappliedBackup.hasBackup() && unappliedBackup.profileApplied(),

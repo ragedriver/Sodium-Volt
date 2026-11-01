@@ -25,12 +25,20 @@ public final class ProfilesLogicTest {
 	}
 
 	private static void testDisabledTickMonitorGate() {
-		check(!ProfileTickGate.requiresUpdate(false, false),
+		check(!ProfileTickGate.requiresUpdate(false, false, false),
 				"stable disabled profile ticks must stop after one volatile snapshot check");
-		check(ProfileTickGate.requiresUpdate(false, true),
+		check(ProfileTickGate.requiresUpdate(false, true, false),
 				"the enabled-to-disabled profile transition must run once to restore owned state");
-		check(ProfileTickGate.requiresUpdate(true, false),
+		check(ProfileTickGate.requiresUpdate(true, false, false),
 				"enabling profiles must initialize and apply the active context");
+		check(!ProfileTickGate.requiresUpdate(true, false, true),
+				"joining a world must not replace Recovery's startup safe graphics with a profile");
+		check(!ProfileTickGate.requiresUpdate(true, true, true),
+				"world transitions must stay pending while Recovery retains an owned safe profile");
+		check(!ProfileTickGate.requiresUpdate(false, true, true),
+				"disabling Profiles must wait for Recovery restoration before restoring global options");
+		check(ProfileTickGate.requiresUpdate(true, true, false),
+				"a deferred world transition resumes as soon as Recovery releases ownership");
 	}
 
 	private static void testSettingsBoundsAndOwnership() {
