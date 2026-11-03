@@ -1,5 +1,28 @@
 # Sodium Volt Changelog
 
+## 1.0.5+mc26.3
+
+### Performance Improvements
+
+- Reduced repeated particle classification during VAPS extraction.
+- Reduced per-frame bookkeeping in the decision table shared by VAPS and BERP.
+- Reduced per-sprite checks in Animated Texture Throttling by reusing atlas protection decisions and skipping exemption lookups for already protected sprites.
+- Improved Resource-Pack Shield ZIP scanning with bulk entry-name reads and a reused UTF-8 decoder.
+- Released native ZIP decompression resources promptly after inspection.
+
+### Fixes
+
+- Fixed shader include overrides bypassing Resource-Pack Shield's core shader protection.
+- Fixed resource-pack metadata reaching Minecraft's parser before Shield applies its size and validation limits.
+- Fixed Resource-Pack Shield admitting packs after an incomplete inspection in reject mode.
+- Fixed resource-pack ZIP replacements between scanning and opening by sharing a private archive copy with Minecraft in reject mode.
+- Fixed rejected resource-pack reloads leaving direct or queued requests pending, blocking later valid reloads and keeping the GPU Timeout Watchdog suppressed.
+- Fixed unrelated pack discovery during rollback overwriting the selected pack's rejection reason. Discovery failures still report when no selected pack produced a diagnostic.
+- Fixed Resource-Pack Shield leaving temporary ZIP copies after interrupted sessions by reclaiming copies whose owning process has exited.
+- Fixed the GPU Timeout Watchdog missing stalls during client tasks and Sodium Volt's end-of-frame callbacks.
+- Fixed the GPU Timeout Watchdog ignoring valid negative or zero timestamps and mishandling signed clock wraparound.
+- Fixed Profiles raising valid FPS limits below 30 FPS. Profile limits now follow Minecraft's 10 FPS increments, and older values load at their previous effective cap.
+
 ## 1.0.4+mc26.3
 
 ### Minecraft 26.3 migration

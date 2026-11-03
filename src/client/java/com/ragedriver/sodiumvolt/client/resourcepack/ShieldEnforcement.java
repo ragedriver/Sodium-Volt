@@ -11,7 +11,6 @@ public final class ShieldEnforcement {
 		return policy != null
 				&& policy.rejectViolations()
 				&& reason != null
-				&& reason != ShieldReason.NONE
-				&& reason != ShieldReason.MONITOR_FAILURE;
+				&& reason != ShieldReason.NONE;
 	}
 }

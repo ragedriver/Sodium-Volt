@@ -150,20 +150,14 @@ public final class AnimatedTextureThrottleEngine {
 			boolean active = sodium.sodium$isActive();
 			boolean visible = visibility.sodiumVolt$visibilityGeneration()
 					== completedVisibilityGeneration && completedVisibilityGeneration != 0;
-			boolean interfaceProtected = cycle.keepInterfaceAtlasesFullSpeed()
-					&& !AttAtlasPolicy.isWorldAtlasTexture(cycle.atlasLocation());
+			boolean interfaceProtected = cycle.interfaceProtected();
 			boolean screenProtected = cycle.keepInterfaceAtlasesFullSpeed()
 					&& active
 					&& cycle.screenOpen();
 			boolean unknownActive = completedVisibilityGeneration == 0 || active && !visible;
-			Identifier spriteId = sprite.contents().name();
-			boolean exempt = isExempt(spriteId, cycle);
-			boolean exemptionGranted = exempt
-					&& !cycle.warmup()
-					&& !interfaceProtected
-					&& !screenProtected
-					&& !unknownActive
-					&& BUDGET.claimExemption();
+			boolean protectedTick = cycle.warmup() || interfaceProtected || screenProtected || unknownActive;
+			boolean exempt = !protectedTick && isExempt(sprite.contents().name(), cycle);
+			boolean exemptionGranted = exempt && BUDGET.claimExemption();
 			double distance = visibility.sodiumVolt$minimumDistanceSquared();
 			boolean normalAvailable = BUDGET.canClaimNormal();
 			decision = AttPolicy.decide(

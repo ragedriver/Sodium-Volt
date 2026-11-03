@@ -17,6 +17,7 @@ final class ResourcePackShieldSession {
 	private final long configRevision;
 	private final long controlGeneration;
 	private final ResourcePackShieldEngine.ReloadToken reloadToken;
+	private final boolean metadataOnly;
 	private final Path archivePath;
 	private final ShieldArchiveOpenGate archiveOpenGate;
 	private final DirectoryCandidateValidator.Cache directoryValidationCache;
@@ -31,6 +32,7 @@ final class ResourcePackShieldSession {
 			long configRevision,
 			long controlGeneration,
 			ResourcePackShieldEngine.ReloadToken reloadToken,
+			boolean metadataOnly,
 			Path archivePath,
 			List<Path> directoryRoots
 	) {
@@ -41,6 +43,7 @@ final class ResourcePackShieldSession {
 		this.reloadToken = reloadToken == null
 				? ResourcePackShieldEngine.ReloadToken.DISABLED
 				: reloadToken;
+		this.metadataOnly = metadataOnly;
 		this.archivePath = archivePath;
 		this.archiveOpenGate = archivePath == null ? null : new ShieldArchiveOpenGate();
 		this.directoryValidationCache = DirectoryCandidateValidator.newCache(
@@ -60,6 +63,10 @@ final class ResourcePackShieldSession {
 
 	long controlGeneration() {
 		return this.controlGeneration;
+	}
+
+	boolean metadataOnly() {
+		return this.metadataOnly;
 	}
 
 	ShieldReadBudget readBudget() {
@@ -171,7 +178,7 @@ final class ResourcePackShieldSession {
 				return onViolation(reason);
 			}
 		} catch (IOException | RuntimeException exception) {
-			onViolation(ShieldReason.MONITOR_FAILURE);
+			return onViolation(ShieldReason.MONITOR_FAILURE);
 		}
 		return false;
 	}
@@ -203,7 +210,7 @@ final class ResourcePackShieldSession {
 				return onViolation(ShieldReason.ARCHIVE_SIZE);
 			}
 		} catch (IOException | RuntimeException exception) {
-			onViolation(ShieldReason.MONITOR_FAILURE);
+			return onViolation(ShieldReason.MONITOR_FAILURE);
 		}
 		return false;
 	}

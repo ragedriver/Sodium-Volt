@@ -51,8 +51,16 @@ public final class ProfilesLogicTest {
 		check(bounded.simulationDistance() == ProfileSettings.SIMULATION_DISTANCE_MAX,
 				"simulation distance is bounded");
 		check(bounded.entityDistancePercent() == 50
-					&& bounded.framerateLimit() == 255,
+					&& bounded.framerateLimit() == 250,
 				"stepped settings are normalized");
+
+		for (int limit : new int[]{10, 20, 260}) {
+			ProfileSettings vanilla = new ProfileSettings(12, 12, 100, limit, ProfileParticleMode.ALL);
+			check(vanilla.equals(vanilla.sanitized()), "vanilla FPS limits survive normalization");
+		}
+		ProfileSettings oldProfile = new ProfileSettings(12, 12, 100, 35, ProfileParticleMode.ALL);
+		check(oldProfile.sanitized().framerateLimit() == 30,
+				"legacy five-FPS step preserves its effective vanilla cap");
 
 		ProfileSettings global = new ProfileSettings(
 				16, 12, 100, 120, ProfileParticleMode.ALL

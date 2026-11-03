@@ -177,6 +177,9 @@ public final class VisibilityAwareParticleScheduler {
 				ParticleGroup<?> group = entry.getValue();
 				Queue<Particle> particles = ((ParticleGroupAccessor) group).sodiumVolt$getParticles();
 				int sourceIndex = 0;
+				Class<?> previousType = null;
+				boolean criticalType = false;
+				boolean ambientType = false;
 				for (Particle particle : particles) {
 					int particleSourceIndex = sourceIndex++;
 					if (frame.scannedCount >= MAXIMUM_PARTICLES_SCANNED) {
@@ -204,7 +207,14 @@ public final class VisibilityAwareParticleScheduler {
 						continue;
 					}
 
-					boolean critical = visible && preserveCritical && isCriticalParticle(particle);
+					Class<?> particleType = particle.getClass();
+					// Particle queues commonly contain consecutive particles of the same class.
+					if (particleType != previousType) {
+						previousType = particleType;
+						criticalType = preserveCritical && isCriticalParticle(particle);
+						ambientType = coalesceAmbient && isAmbientParticle(particle);
+					}
+					boolean critical = visible && criticalType;
 					if (critical && frame.limiter.tryCritical(criticalReserve)) {
 						selectParticleForFrame(
 								frame,
@@ -228,30 +238,30 @@ public final class VisibilityAwareParticleScheduler {
 							+ yDistance * forward.y()
 							+ zDistance * forward.z() < 0.0D) {
 						if (visible && collectStatistics) {
-							STATS.addBehind(particle.getClass());
+							STATS.addBehind(particleType);
 						}
 						continue;
 					}
 
-					if (limitPerType && !frame.limiter.tryType(particle.getClass(), perTypeLimit)) {
+					if (limitPerType && !frame.limiter.tryType(particleType, perTypeLimit)) {
 						if (visible && collectStatistics) {
-							STATS.addPerType(particle.getClass());
+							STATS.addPerType(particleType);
 						}
 						continue;
 					}
-					if (coalesceAmbient && isAmbientParticle(particle) && isFinite(x, y, z)) {
+					if (ambientType && isFinite(x, y, z)) {
 						int cellX = cellCoordinate(x);
 						int cellY = cellCoordinate(y);
 						int cellZ = cellCoordinate(z);
 						if (!frame.limiter.tryAmbientCell(
-								particle.getClass(),
+								particleType,
 								cellX,
 								cellY,
 								cellZ,
 								ambientLimit
 						)) {
 							if (visible && collectStatistics) {
-								STATS.addCoalesced(particle.getClass());
+								STATS.addCoalesced(particleType);
 							}
 							continue;
 						}

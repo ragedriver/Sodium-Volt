@@ -117,6 +117,8 @@ public final class ResourcePackShieldLogicTest {
 		testDirectoryLinksAndCount();
 		testPngAndJsonValidation();
 		testShaderPolicy();
+		testArchiveSnapshotReplacement();
+		testArchiveOrphanReclamation();
 		testOverlaySemanticsAndBudgets();
 		testHardDirectoryContainment();
 		testSingleAuthoritativeJsonValidation();
@@ -206,6 +208,7 @@ public final class ResourcePackShieldLogicTest {
 			expectIo(closedHeld::read, "closed session retires held streams");
 			ResourcePackShieldEngine.watchResourceReload(null, token);
 			ResourcePackShieldEngine.watchResourceReload(null, pendingToken);
+			testReloadDiscoveryDiagnostics(config);
 		} finally {
 			configDir.set(loader, previousDirectory);
 			deleteTree(directory);
@@ -216,7 +219,61 @@ public final class ResourcePackShieldLogicTest {
 			ResourcePackShieldEngine.ReloadToken token) {
 		var snapshot = config.runtimeSnapshot();
 		return new ResourcePackShieldSession(ShieldSourceKind.LOCAL, snapshot.policy(),
-				snapshot.enforcementRevision(), token.controlGeneration(), token, null, List.of());
+				snapshot.enforcementRevision(), token.controlGeneration(), token, false, null, List.of());
+	}
+
+	private static void testReloadDiscoveryDiagnostics(ResourcePackShieldConfig config) {
+		config.setShowInspectorStatistics(true);
+		config.setRejectViolations(true);
+		var reload = ResourcePackShieldEngine.beginResourceReload();
+		var rollback = ResourcePackShieldEngine.ReloadToken.DISABLED;
+		try {
+			check(testDiscoverySession(config, reload).onViolation(ShieldReason.SINGLE_RESOURCE_SIZE),
+					"initial discovery enforces oversized metadata before selected scan");
+			ResourcePackShieldSession selected = testSession(config, reload);
+			check(selected.onViolation(ShieldReason.CORE_SHADER_OVERRIDE), "selected shader pack rejects");
+			var selectedStats = ResourcePackShieldEngine.snapshotStatistics();
+			check(selectedStats.lastReason() == ShieldReason.CORE_SHADER_OVERRIDE,
+					"selected reload publishes its rejection reason");
+			rollback = ResourcePackShieldEngine.beginResourceReload();
+			ResourcePackShieldSession discovery = testDiscoverySession(config, rollback);
+			check(discovery.onViolation(ShieldReason.SINGLE_RESOURCE_SIZE), "discovery still rejects oversized metadata");
+			var discoveryStats = ResourcePackShieldEngine.snapshotStatistics();
+			check(discoveryStats.rejections() == selectedStats.rejections() + 1,
+					"reload discovery rejection is still counted");
+			check(discoveryStats.lastReason() == ShieldReason.CORE_SHADER_OVERRIDE
+						&& discoveryStats.lastSource() == ShieldSourceKind.LOCAL,
+					"unrelated rollback discovery preserves the selected reload diagnostic");
+		} finally {
+			ResourcePackShieldEngine.watchResourceReload(null, reload);
+			ResourcePackShieldEngine.watchResourceReload(null, rollback);
+		}
+		check(ResourcePackShieldEngine.snapshotStatistics().lastReason() == ShieldReason.CORE_SHADER_OVERRIDE,
+				"finishing rollback does not publish unrelated discovery");
+		var discoveryOnlyReload = ResourcePackShieldEngine.beginResourceReload();
+		try {
+			check(testDiscoverySession(config, discoveryOnlyReload).onViolation(ShieldReason.SINGLE_RESOURCE_SIZE),
+					"metadata-only rejection is enforced inside a reload");
+		} finally {
+			ResourcePackShieldEngine.watchResourceReload(null, discoveryOnlyReload);
+		}
+		check(ResourcePackShieldEngine.snapshotStatistics().lastReason() == ShieldReason.SINGLE_RESOURCE_SIZE,
+				"reload publishes its discovery fallback when no selected diagnostic exists");
+
+		check(testDiscoverySession(config, reload).onViolation(ShieldReason.JSON_NESTING),
+				"standalone discovery rejects invalid metadata");
+		var standalone = ResourcePackShieldEngine.snapshotStatistics();
+		check(standalone.lastReason() == ShieldReason.JSON_NESTING
+					&& standalone.lastSource() == ShieldSourceKind.SERVER,
+				"standalone discovery publishes its own diagnostic");
+	}
+
+	private static ResourcePackShieldSession testDiscoverySession(ResourcePackShieldConfig config,
+			ResourcePackShieldEngine.ReloadToken reload) {
+		var snapshot = config.runtimeSnapshot();
+		return new ResourcePackShieldSession(ShieldSourceKind.SERVER, snapshot.policy(),
+				snapshot.enforcementRevision(), reload.controlGeneration(),
+				ResourcePackShieldEngine.ReloadToken.DISABLED, true, null, List.of());
 	}
 
 	private static void testAmbiguousZipDirectories() throws Exception {
@@ -554,9 +611,89 @@ public final class ResourcePackShieldLogicTest {
 			check(ZipPackScanner.scan(archive, policy(true)).reason()
 							== ShieldReason.CORE_SHADER_OVERRIDE,
 					"shader override scan");
+			writeZip(archive, Map.of(
+					"assets/minecraft/shaders/include/fog.glsl",
+					"// patched include".getBytes(StandardCharsets.UTF_8)
+			));
+			check(ZipPackScanner.scan(archive, policy(true)).reason() == ShieldReason.CORE_SHADER_OVERRIDE,
+					"shader include override must be blocked during archive scan");
+			check(ZipPackScanner.scanMetadata(archive, policy(true), Long.MAX_VALUE).accepted(),
+					"discovery defers non-metadata entries to the selected pack's full scan");
 		} finally {
 			Files.deleteIfExists(archive);
 			Files.deleteIfExists(directory);
+		}
+	}
+
+	private static void testArchiveSnapshotReplacement() throws Exception {
+		Path source = Files.createTempFile("sodium-volt-shield-source-", ".zip");
+		Path replacement = Files.createTempFile("sodium-volt-shield-replacement-", ".zip");
+		Path snapshotPath = null;
+		try {
+			writeZip(source, Map.of("assets/example/test.txt", new byte[]{1}));
+			writeZip(replacement, Map.of("assets/minecraft/shaders/include/fog.glsl", new byte[]{2}));
+			try (ShieldArchiveSnapshot snapshot = ShieldArchiveSnapshot.copy(source, 1_048_576L, Long.MAX_VALUE)) {
+				check(snapshot.reason() == ShieldReason.NONE, "copy benign ZIP");
+				snapshotPath = snapshot.path();
+				check(ZipPackScanner.scan(snapshotPath, policy(true)).accepted(), "validate copied ZIP");
+				Files.move(replacement, source, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+				check(ZipPackScanner.scan(source, policy(true)).reason() == ShieldReason.CORE_SHADER_OVERRIDE,
+						"replacement would be rejected");
+				try (java.util.zip.ZipFile opened = new java.util.zip.ZipFile(snapshotPath.toFile())) {
+					check(opened.getEntry("assets/example/test.txt") != null
+								&& opened.getEntry("assets/minecraft/shaders/include/fog.glsl") == null,
+							"vanilla ZIP reader sees only the validated snapshot after replacement");
+				}
+			}
+			check(!Files.exists(snapshotPath), "closing the final owner removes the snapshot");
+			if (snapshotPath.getFileName().toString().equals("pack.zip")) {
+				check(!Files.exists(snapshotPath.getParent()), "closing the final owner removes its private directory");
+			}
+			try (ShieldArchiveSnapshot oversized = ShieldArchiveSnapshot.copy(source, 1L, Long.MAX_VALUE)) {
+				check(oversized.path() == null && oversized.reason() == ShieldReason.ARCHIVE_SIZE,
+						"archive snapshot refuses source outside its byte budget");
+			}
+		} finally {
+			Files.deleteIfExists(replacement);
+			Files.deleteIfExists(source);
+		}
+	}
+
+	private static void testArchiveOrphanReclamation() throws Exception {
+		Path root = Files.createTempDirectory("sodium-volt-orphan-test-");
+		try (var entries = Files.newDirectoryStream(root)) {
+			boolean secureDirectories = entries instanceof java.nio.file.SecureDirectoryStream<?>;
+			Path orphan = Files.createDirectory(root.resolve("sodium-volt-pack-11-100"));
+			Path active = Files.createDirectory(root.resolve("sodium-volt-pack-12-100"));
+			Path legacy = Files.createDirectory(root.resolve("sodium-volt-pack-100"));
+			Path unexpected = Files.createDirectory(root.resolve("sodium-volt-pack-13-100"));
+			for (Path directory : List.of(orphan, active, legacy, unexpected)) {
+				Files.write(directory.resolve("pack.zip"), new byte[]{1});
+			}
+			Files.write(unexpected.resolve("keep.txt"), new byte[]{2});
+			Path flatOrphan = Files.write(root.resolve("sodium-volt-pack-11-100.zip"), new byte[]{1});
+			Path flatActive = Files.write(root.resolve("sodium-volt-pack-12-100.zip"), new byte[]{1});
+			Path flatDirectory = Files.createDirectory(root.resolve("sodium-volt-pack-13-100.zip"));
+			Path link = root.resolve("sodium-volt-pack-14-100");
+			Path flatLink = root.resolve("sodium-volt-pack-14-100.zip");
+			if (secureDirectories) {
+				Files.createSymbolicLink(link, active);
+				Files.createSymbolicLink(flatLink, flatActive);
+			}
+			ShieldArchiveOrphanCleanup.reclaimOrphans(root, Files.getOwner(root), pid -> pid == 12L);
+			check(Files.exists(orphan) != secureDirectories, "directory reclamation requires safe traversal");
+			check(!Files.exists(flatOrphan), "flat orphan is reclaimed on the portable path");
+			check(Files.exists(flatActive), "flat live owner is left untouched");
+			check(Files.isDirectory(flatDirectory), "flat cleanup refuses directory-shaped entries");
+			check(Files.exists(active.resolve("pack.zip")), "live or reused PID is left untouched");
+			check(Files.exists(legacy.resolve("pack.zip")), "unowned legacy snapshot is left untouched");
+			check(Files.exists(unexpected.resolve("pack.zip")), "unexpected directory contents prevent cleanup");
+			if (secureDirectories) {
+				check(Files.isSymbolicLink(link), "a directory symlink is never traversed");
+				check(Files.isSymbolicLink(flatLink), "a flat symlink is never reclaimed");
+			}
+		} finally {
+			deleteTree(root);
 		}
 	}
 
@@ -794,6 +931,9 @@ public final class ResourcePackShieldLogicTest {
 			check(archiveBootstrap.reason() == ShieldReason.JSON_NESTING
 							&& archiveBootstrap.inspectedBytes() > 0L,
 					"malformed ZIP root pack.mcmeta is rejected in preflight");
+			check(ZipPackScanner.scanMetadata(archive, policy(true), Long.MAX_VALUE).reason()
+							== ShieldReason.JSON_NESTING,
+					"discovery rejects malformed ZIP metadata before the game parses it");
 			writeZip(archive, Map.of("unused.json", malformed));
 			ShieldScanResult archiveScan = ZipPackScanner.scan(archive, policy(true));
 			check(archiveScan.accepted() && archiveScan.inspectedBytes() == 0L,
@@ -1040,8 +1180,10 @@ public final class ResourcePackShieldLogicTest {
 				"reject action");
 		check(!ShieldEnforcement.shouldReject(policy(false), ShieldReason.UNSAFE_PATH),
 				"monitor-only action");
-		check(!ShieldEnforcement.shouldReject(policy(true), ShieldReason.MONITOR_FAILURE),
-				"internal monitor failure never rejects");
+		check(ShieldEnforcement.shouldReject(policy(true), ShieldReason.MONITOR_FAILURE),
+				"reject mode blocks incomplete inspection");
+		check(!ShieldEnforcement.shouldReject(policy(false), ShieldReason.MONITOR_FAILURE),
+				"monitor mode preserves compatibility when inspection fails");
 
 		CompletableFuture<String> prerequisite = new CompletableFuture<>();
 		CompletableFuture<String> guarded = ShieldReloadGate.guardInitialTask(

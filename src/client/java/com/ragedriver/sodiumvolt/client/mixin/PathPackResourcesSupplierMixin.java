@@ -3,6 +3,7 @@ package com.ragedriver.sodiumvolt.client.mixin;
 import com.ragedriver.sodiumvolt.client.resourcepack.ResourcePackShieldEngine;
 import com.ragedriver.sodiumvolt.client.resourcepack.ShieldResourceStream;
 import net.minecraft.server.packs.PackLocationInfo;
+import net.minecraft.server.packs.PackMetadataResources;
 import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.PathPackResources;
 import net.minecraft.server.packs.repository.Pack;
@@ -21,6 +22,15 @@ public abstract class PathPackResourcesSupplierMixin {
 	@Shadow
 	@Final
 	private Path content;
+
+	@Inject(method = "openMetadata", at = @At("RETURN"), cancellable = true)
+	private void sodiumVolt$guardMetadata(
+			PackLocationInfo location, CallbackInfoReturnable<PackMetadataResources> callbackInfo
+	) {
+		callbackInfo.setReturnValue(ResourcePackShieldEngine.guardMetadata(
+				this.content, location, callbackInfo.getReturnValue(), false, null
+		));
+	}
 
 	@Inject(
 			method = "openResources",

@@ -7,7 +7,8 @@ public final class GpuWatchdogPolicy {
 	public static final int MAXIMUM_REPORTED_MILLIS = 300_000;
 
 	private long observedSequence = Long.MIN_VALUE;
-	private long lastIncidentNanos = Long.MIN_VALUE;
+	private long lastIncidentNanos;
+	private boolean incidentRecorded;
 	private int criticalConfirmations;
 	private int incidents;
 	private boolean warningIssued;
@@ -22,11 +23,12 @@ public final class GpuWatchdogPolicy {
 			long frameSequence,
 			Settings settings
 	) {
-		if (!inFrame || !monitoringAllowed || frameSequence <= 0L || frameStartNanos <= 0L) {
+		if (!inFrame || !monitoringAllowed || frameSequence <= 0L) {
 			resetCurrentFrame();
 			return EVENT_NONE;
 		}
-		if (nowNanos < frameStartNanos) {
+		long elapsedNanos = nowNanos - frameStartNanos;
+		if (elapsedNanos < 0L) {
 			this.observedSequence = frameSequence;
 			this.latestDurationMillis = 0;
 			this.criticalConfirmations = 0;
@@ -40,7 +42,6 @@ public final class GpuWatchdogPolicy {
 			this.warningIssued = false;
 			this.criticalHandled = false;
 		}
-		long elapsedNanos = saturatedSubtract(nowNanos, frameStartNanos);
 		this.latestDurationMillis = boundedMillis(elapsedNanos);
 		if (elapsedNanos < settings.warningThresholdNanos()) {
 			return EVENT_NONE;
@@ -57,17 +58,18 @@ public final class GpuWatchdogPolicy {
 				if (this.incidents >= settings.maximumIncidents()) {
 					return EVENT_NONE;
 				}
-				if (this.lastIncidentNanos != Long.MIN_VALUE) {
-					if (nowNanos < this.lastIncidentNanos) {
+				if (this.incidentRecorded) {
+					long sinceIncident = nowNanos - this.lastIncidentNanos;
+					if (sinceIncident < 0L) {
 						this.lastIncidentNanos = nowNanos;
 						return EVENT_NONE;
 					}
-					if (saturatedSubtract(nowNanos, this.lastIncidentNanos)
-							< settings.incidentCooldownNanos()) {
+					if (sinceIncident < settings.incidentCooldownNanos()) {
 						return EVENT_NONE;
 					}
 				}
 				this.lastIncidentNanos = nowNanos;
+				this.incidentRecorded = true;
 				this.incidents = saturatingIncrement(
 						this.incidents,
 						settings.maximumIncidents()
@@ -116,11 +118,6 @@ public final class GpuWatchdogPolicy {
 
 	private static int saturatingIncrement(int value, int maximum) {
 		return value >= maximum ? maximum : value + 1;
-	}
-
-	private static long saturatedSubtract(long current, long previous) {
-		long result = current - previous;
-		return result < 0L ? Long.MAX_VALUE : result;
 	}
 
 	public record Settings(

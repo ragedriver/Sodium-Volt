@@ -88,7 +88,8 @@ public final class ShieldPathPolicy {
 
 	public static boolean isCoreShader(String normalizedPath) {
 		return normalizedPath != null
-				&& normalizedPath.startsWith("assets/minecraft/shaders/core/")
+				&& (normalizedPath.startsWith("assets/minecraft/shaders/core/")
+						|| normalizedPath.startsWith("assets/minecraft/shaders/include/"))
 				&& !normalizedPath.endsWith("/");
 	}
 

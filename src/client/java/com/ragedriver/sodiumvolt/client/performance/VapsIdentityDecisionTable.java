@@ -14,10 +14,8 @@ final class VapsIdentityDecisionTable<T> {
 
 	private final Object[] keys;
 	private final byte[] decisions;
-	private final int[] generations;
 	private final int[] occupiedSlots;
 	private final int mask;
-	private int generation = 1;
 	private int occupiedCount;
 
 	VapsIdentityDecisionTable(int capacity) {
@@ -29,7 +27,6 @@ final class VapsIdentityDecisionTable<T> {
 		}
 		this.keys = new Object[capacity];
 		this.decisions = new byte[capacity];
-		this.generations = new int[capacity];
 		this.occupiedSlots = new int[capacity];
 		this.mask = capacity - 1;
 	}
@@ -37,16 +34,12 @@ final class VapsIdentityDecisionTable<T> {
 	void nextFrame() {
 		// Recover safely if extraction failed before its RETURN injection.
 		releaseFrame();
-		if (++this.generation == 0) {
-			this.generation = 1;
-		}
 	}
 
 	int record(T value) {
 		int index = mix(System.identityHashCode(value)) & this.mask;
 		for (int probe = 0; probe < MAX_PROBES; probe++) {
-			if (this.generations[index] != this.generation) {
-				this.generations[index] = this.generation;
+			if (this.decisions[index] == UNKNOWN) {
 				this.keys[index] = value;
 				this.decisions[index] = SCANNED;
 				this.occupiedSlots[this.occupiedCount++] = index;
@@ -84,16 +77,13 @@ final class VapsIdentityDecisionTable<T> {
 		for (int occupiedIndex = 0; occupiedIndex < this.occupiedCount; occupiedIndex++) {
 			int slot = this.occupiedSlots[occupiedIndex];
 			this.keys[slot] = null;
-			this.decisions[slot] = 0;
-			this.generations[slot] = 0;
-			this.occupiedSlots[occupiedIndex] = 0;
+			this.decisions[slot] = UNKNOWN;
 		}
 		this.occupiedCount = 0;
 	}
 
 	void clear() {
 		releaseFrame();
-		this.generation = 1;
 	}
 
 	int occupiedCountForTesting() {
@@ -112,7 +102,7 @@ final class VapsIdentityDecisionTable<T> {
 	private int find(T value) {
 		int index = mix(System.identityHashCode(value)) & this.mask;
 		for (int probe = 0; probe < MAX_PROBES; probe++) {
-			if (this.generations[index] != this.generation) {
+			if (this.decisions[index] == UNKNOWN) {
 				return -1;
 			}
 			if (this.keys[index] == value) {

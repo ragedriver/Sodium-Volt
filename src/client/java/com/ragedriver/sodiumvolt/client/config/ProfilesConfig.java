@@ -538,11 +538,16 @@ public final class ProfilesConfig {
 		}
 		JsonObject object = element.getAsJsonObject();
 		ShieldJsonFile.requireExactKeys(object, SETTINGS_KEYS);
+		int framerateLimit = ShieldJsonFile.requiredInteger(object, "framerate_limit");
+		// Version 1 previously saved five-FPS increments starting at 30.
+		if (framerateLimit >= 35 && framerateLimit <= 255 && framerateLimit % 10 == 5) {
+			framerateLimit -= 5;
+		}
 		ProfileSettings settings = new ProfileSettings(
 				ShieldJsonFile.requiredInteger(object, "render_distance"),
 				ShieldJsonFile.requiredInteger(object, "simulation_distance"),
 				ShieldJsonFile.requiredInteger(object, "entity_distance_percent"),
-				ShieldJsonFile.requiredInteger(object, "framerate_limit"),
+				framerateLimit,
 				ProfileParticleMode.parse(ShieldJsonFile.requiredString(
 						object, "particle_mode", 16
 				))

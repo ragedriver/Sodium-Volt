@@ -12,6 +12,7 @@ import net.minecraft.server.packs.resources.ResourceMetadata;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Locale;
@@ -23,19 +24,30 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class ShieldedPackResources implements PackResources {
 	private final PackResources delegate;
 	private final ResourcePackShieldSession session;
+	private final @Nullable ShieldArchiveSnapshot snapshot;
 	private final AtomicBoolean closed = new AtomicBoolean();
 	private volatile @Nullable ResourceMetadata metadata;
 
-	ShieldedPackResources(PackResources delegate, ResourcePackShieldSession session) {
+	ShieldedPackResources(
+			PackResources delegate, ResourcePackShieldSession session, @Nullable ShieldArchiveSnapshot snapshot
+	) {
 		this.delegate = delegate;
 		this.session = session;
+		this.snapshot = snapshot;
+		if (snapshot != null) {
+			snapshot.retain();
+		}
+	}
+
+	private boolean isRejected() {
+		return this.snapshot != null && this.snapshot.path() == null || this.session.isRejected();
 	}
 
 	@Override
 	public @Nullable IoSupplier<InputStream> getRootResource(String... elements) {
 		String logicalPath = String.join("/", elements);
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
-			if (this.session.isRejected()
+			if (isRejected()
 					|| this.session.validateArchiveSource(lease)
 					|| this.session.validateLogicalPath(logicalPath)) {
 				throw new ResourcePackShieldRejectedException();
@@ -53,7 +65,7 @@ final class ShieldedPackResources implements PackResources {
 		String logicalPath = type.getDirectory() + "/" + identifier.getNamespace()
 				+ "/" + identifier.getPath();
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
-			if (this.session.isRejected()
+			if (isRejected()
 					|| this.session.validateArchiveSource(lease)
 					|| this.session.validateLogicalPath(logicalPath)) {
 				throw new ResourcePackShieldRejectedException();
@@ -75,7 +87,7 @@ final class ShieldedPackResources implements PackResources {
 	) {
 		String requestedPath = type.getDirectory() + "/" + namespace + "/" + prefix;
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
-			if (this.session.isRejected()
+			if (isRejected()
 					|| this.session.validateArchiveSource(lease)
 					|| this.session.validateLogicalPath(requestedPath)
 					|| this.session.validateDirectoryPrefix(requestedPath)) {
@@ -97,7 +109,7 @@ final class ShieldedPackResources implements PackResources {
 	@Override
 	public Set<String> getNamespaces(PackType type) {
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
-			if (this.session.isRejected()
+			if (isRejected()
 					|| this.session.validateArchiveSource(lease)
 					|| this.session.validateDirectoryPrefix(type.getDirectory())) {
 				return Set.of();
@@ -123,7 +135,7 @@ final class ShieldedPackResources implements PackResources {
 	@Override
 	public <T> @Nullable T getMetadataSection(MetadataSectionType<T> type) throws IOException {
 		try (ShieldArchiveOpenGate.Lease lease = this.session.beginArchiveAccess()) {
-			if (this.session.isRejected() || this.session.validateArchiveSource(lease)) {
+			if (isRejected() || this.session.validateArchiveSource(lease)) {
 				return null;
 			}
 			ResourceMetadata current = this.metadata;
@@ -157,7 +169,13 @@ final class ShieldedPackResources implements PackResources {
 			try {
 				this.delegate.close();
 			} finally {
-				this.session.close();
+				try {
+					this.session.close();
+				} finally {
+					if (this.snapshot != null) {
+						this.snapshot.close();
+					}
+				}
 			}
 		}
 	}
@@ -172,13 +190,13 @@ final class ShieldedPackResources implements PackResources {
 		}
 		ShieldedInputStream.ContentKind contentKind = contentKind(logicalPath);
 		return () -> {
-			if (this.session.isRejected()) {
+			if (isRejected()) {
 				throw new IOException("Resource pack session requires reopening under current Shield policy");
 			}
 			if (!this.session.isCurrent()) {
 				return supplier.get();
 			}
-			if (this.session.isRejected()
+			if (isRejected()
 					|| this.session.validateLogicalPath(logicalPath)) {
 				throw new IOException("Resource pack rejected by Resource-Pack Shield policy");
 			}
@@ -194,7 +212,15 @@ final class ShieldedPackResources implements PackResources {
 			} else {
 				input = supplier.get();
 			}
-			return this.session.wrap(input, contentKind);
+			InputStream guarded = this.session.wrap(input, contentKind);
+			if (primaryOnly && PackResources.PACK_META.equals(logicalPath)
+					&& this.session.isDirectorySource() && this.session.policy().rejectViolations()) {
+				// Parse the same bounded bytes that passed validation, even if the source file changes.
+				try (guarded) {
+					return new ByteArrayInputStream(guarded.readAllBytes());
+				}
+			}
+			return guarded;
 		};
 	}
 

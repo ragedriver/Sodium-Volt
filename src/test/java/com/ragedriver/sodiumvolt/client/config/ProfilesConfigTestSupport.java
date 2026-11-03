@@ -57,7 +57,7 @@ public final class ProfilesConfigTestSupport {
 					"single-player scope changes invalidate identity context");
 			defaults.setSinglePlayerProfilesEnabled(true);
 			defaults.initializeGlobalDefaults(new ProfileSettings(
-					20, 10, 150, 90, ProfileParticleMode.DECREASED
+					20, 10, 150, 10, ProfileParticleMode.DECREASED
 			));
 			defaults.storeServerProfile(serverKey, ProfileSettings.serverDefaults());
 			defaults.storeSinglePlayerProfile(worldKey, ProfileSettings.singlePlayerDefaults());
@@ -76,6 +76,17 @@ public final class ProfilesConfigTestSupport {
 			check(loaded.serverProfileCount() == 1
 						&& loaded.singlePlayerProfileCount() == 1,
 					"strict round trip preserves hashed records");
+
+			check(loaded.getGlobalDefaults().framerateLimit() == 10,
+					"strict config round trip preserves the vanilla 10 FPS cap");
+
+			Files.writeString(path, valid.replaceFirst(
+					"\"framerate_limit\": 10", "\"framerate_limit\": 35"
+			));
+			ProfilesConfig legacy = ProfilesConfig.load(path);
+			check(legacy.isProfilesEnabled() && legacy.serverProfileCount() == 1
+						&& legacy.getGlobalDefaults().framerateLimit() == 30,
+					"legacy midpoint migrates without dropping the rest of the configuration");
 
 			assertInvalid(path, valid.replaceFirst(
 					"\"version\": 1", "\"version\": 1, \"version\": 1"

@@ -18,6 +18,7 @@ public final class GpuWatchdogLogicTest {
 	public static void main(String[] arguments) throws Exception {
 		testThresholdsAndConfirmations();
 		testSuppressionAndClockSafety();
+		testSignedNanoTime();
 		testCooldownCapAndSaturation();
 		testLifecycleLateLatch();
 		testFrameFastGateAndMidFrameDisable();
@@ -71,6 +72,24 @@ public final class GpuWatchdogLogicTest {
 						&& policy.latestDurationMillis()
 								== GpuWatchdogPolicy.MAXIMUM_REPORTED_MILLIS,
 				"reported duration must saturate at its fixed bound");
+	}
+
+	private static void testSignedNanoTime() {
+		GpuWatchdogPolicy.Settings settings = settings(1, 3);
+		for (long start : new long[]{-20 * SECOND, 0L, Long.MAX_VALUE - SECOND}) {
+			GpuWatchdogPolicy policy = new GpuWatchdogPolicy();
+			check(policy.evaluate(start + 4 * SECOND, true, true, start, 1L, settings)
+							== GpuWatchdogPolicy.EVENT_WARNING
+							&& policy.latestDurationMillis() == 4_000,
+					"negative, zero, and wraparound timestamps use elapsed duration");
+		}
+		GpuWatchdogPolicy policy = new GpuWatchdogPolicy();
+		check(policy.evaluate(Long.MIN_VALUE, true, true, Long.MIN_VALUE - 9 * SECOND, 1L, settings)
+						== GpuWatchdogPolicy.EVENT_CRITICAL,
+				"the minimum signed timestamp is a valid incident time");
+		check(policy.evaluate(Long.MIN_VALUE + 20 * SECOND, true, true,
+					Long.MIN_VALUE + 11 * SECOND, 2L, settings) == GpuWatchdogPolicy.EVENT_NONE,
+				"incident cooldown applies even when the first timestamp is the signed minimum");
 	}
 
 	private static void testCooldownCapAndSaturation() {

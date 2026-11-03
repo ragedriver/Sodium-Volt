@@ -1,10 +1,12 @@
 package com.ragedriver.sodiumvolt.client.resourcepack;
 
 import com.ragedriver.sodiumvolt.client.config.ResourcePackShieldConfig;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.packs.PackLocationInfo;
+import net.minecraft.server.packs.PackMetadataResources;
 import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.repository.Pack;
 import net.minecraft.util.Unit;
@@ -30,6 +32,9 @@ public final class ResourcePackShieldEngine {
 	private static final AtomicLong READY_EVENT_SEQUENCE = new AtomicLong();
 	private static final AtomicLong AGGREGATE_SCAN_DEADLINE_NANOS = new AtomicLong();
 	private static final AtomicInteger ACTIVE_RELOADS = new AtomicInteger();
+	private static final Object RELOAD_DIAGNOSTICS_LOCK = new Object();
+	private static Diagnostic deferredDiscovery;
+	private static boolean selectedDiagnosticPublished;
 	private static final AtomicReference<PendingNotice> PENDING_NOTICE =
 			new AtomicReference<>();
 	private static final AtomicLong PACKS_SCANNED = new AtomicLong();
@@ -59,16 +64,49 @@ public final class ResourcePackShieldEngine {
 	}
 
 	public static void register() {
+		ClientLifecycleEvents.CLIENT_STARTED.register(minecraft -> ShieldArchiveOrphanCleanup.reclaimOrphans());
 		ClientTickEvents.END_CLIENT_TICK.register(ResourcePackShieldEngine::onClientTick);
+	}
+
+	public static ShieldArchiveSnapshot prepareArchive(
+			Path archive, PackLocationInfo location, boolean metadataOnly
+	) {
+		ResourcePackShieldConfig.RuntimeSnapshot config = CONFIG.runtimeSnapshot();
+		if (!config.enabled() || !config.policy().rejectViolations()
+				|| !scopeEnabled(ShieldSourceScope.classify(location.source()), config)) {
+			return null;
+		}
+		ShieldScanBudget.Allowance allowance = packScanAllowance(config.policy(), metadataOnly);
+		return ShieldArchiveSnapshot.copy(
+				archive, config.policy().maximumArchiveBytes(), allowance.deadlineNanos()
+		);
 	}
 
 	public static PackResources guardArchive(
 			Path archive,
 			Pack.Metadata metadata,
 			PackLocationInfo location,
-			PackResources delegate
+			PackResources delegate,
+			ShieldArchiveSnapshot snapshot
 	) {
-		return guard(archive, metadata, location, delegate, true);
+		return guard(archive, metadata, location, delegate, true, false, snapshot);
+	}
+
+	public static PackMetadataResources guardMetadata(
+			Path source, PackLocationInfo location, PackMetadataResources delegate,
+			boolean archive, ShieldArchiveSnapshot snapshot
+	) {
+		if (!(delegate instanceof PackResources resources)) {
+			ResourcePackShieldConfig.RuntimeSnapshot config = CONFIG.runtimeSnapshot();
+			if (snapshot == null && (!config.enabled()
+					|| !scopeEnabled(ShieldSourceScope.classify(location.source()), config)
+					|| !config.policy().rejectViolations())) {
+				return delegate;
+			}
+			delegate.close();
+			throw new ResourcePackShieldRejectedException();
+		}
+		return guard(source, null, location, resources, archive, true, snapshot);
 	}
 
 	public static PackResources guardDirectory(
@@ -77,7 +115,7 @@ public final class ResourcePackShieldEngine {
 			PackLocationInfo location,
 			PackResources delegate
 	) {
-		return guard(root, metadata, location, delegate, false);
+		return guard(root, metadata, location, delegate, false, false, null);
 	}
 
 	public static ReloadToken beginResourceReload() {
@@ -89,23 +127,18 @@ public final class ResourcePackShieldEngine {
 		if (!runtimeEnabled) {
 			return ReloadToken.DISABLED;
 		}
-		while (true) {
+		synchronized (RELOAD_DIAGNOSTICS_LOCK) {
 			int current = ACTIVE_RELOADS.get();
 			if (current >= MAXIMUM_RELOAD_NESTING) {
 				return ReloadToken.DISABLED;
 			}
-			if (ACTIVE_RELOADS.compareAndSet(current, current + 1)) {
-				if (current == 0) {
-					AGGREGATE_SCAN_DEADLINE_NANOS.set(deadline(
-							config.policy().maximumScanNanos()
-					));
-				}
-				return new ReloadToken(
-						CONTROL_GENERATION.get(),
-						EVENT_SEQUENCE.get(),
-						true
-				);
+			if (current == 0) {
+				selectedDiagnosticPublished = false;
+				deferredDiscovery = null;
+				AGGREGATE_SCAN_DEADLINE_NANOS.set(deadline(config.policy().maximumScanNanos()));
 			}
+			ACTIVE_RELOADS.incrementAndGet();
+			return new ReloadToken(CONTROL_GENERATION.get(), EVENT_SEQUENCE.get(), true);
 		}
 	}
 
@@ -211,25 +244,30 @@ public final class ResourcePackShieldEngine {
 			Pack.Metadata metadata,
 			PackLocationInfo location,
 			PackResources delegate,
-			boolean archive
+			boolean archive,
+			boolean metadataOnly,
+			ShieldArchiveSnapshot snapshot
 	) {
 		ResourcePackShieldConfig.RuntimeSnapshot config = CONFIG.runtimeSnapshot();
 		refreshControl(config);
 		ShieldSourceKind source = ShieldSourceScope.classify(location.source());
-		if (!runtimeEnabled || !scopeEnabled(source, config)) {
+		if ((!runtimeEnabled || !scopeEnabled(source, config)) && snapshot == null) {
 			return delegate;
 		}
 		long revision = config.enforcementRevision();
-		ShieldScanBudget.Allowance allowance = scanAllowance(config.policy());
+		ShieldScanBudget.Allowance allowance = packScanAllowance(config.policy(), metadataOnly);
 		ResourcePackShieldPolicy policy = allowance.policy();
-		ShieldOverlayPlan.Validation overlayValidation = allowance.expired()
+		long deadline = snapshot == null ? allowance.deadlineNanos()
+				: Math.min(snapshot.deadlineNanos(), allowance.deadlineNanos());
+		Path scanPath = snapshot != null && snapshot.path() != null ? snapshot.path() : sourcePath;
+		ShieldOverlayPlan.Validation overlayValidation = ZipPackScanner.expired(deadline)
 				? new ShieldOverlayPlan.Validation(
 						ShieldReason.SCAN_TIME, ShieldOverlayPlan.EMPTY
 				)
 				: ShieldOverlayPlan.validate(
-						metadata == null ? null : metadata.overlays(),
+						metadataOnly ? List.of() : metadata == null ? null : metadata.overlays(),
 						policy,
-						allowance.deadlineNanos()
+						deadline
 				);
 		ShieldOverlayPlan overlays = overlayValidation.plan();
 		ResourcePackShieldSession session = new ResourcePackShieldSession(
@@ -237,39 +275,39 @@ public final class ResourcePackShieldEngine {
 				policy,
 				revision,
 				CONTROL_GENERATION.get(),
-				currentSynchronousReloadToken(),
-				archive ? sourcePath : null,
+				metadataOnly ? ReloadToken.DISABLED : currentSynchronousReloadToken(),
+				metadataOnly,
+				archive ? scanPath : null,
 				archive ? List.of() : directoryRoots(sourcePath, overlays)
 		);
 		ShieldScanResult result;
 		try {
-			result = allowance.expired()
-					? new ShieldScanResult(ShieldReason.SCAN_TIME, 0, 0L, 0L)
-					: overlayValidation.accepted()
-					? archive
-							? ZipPackScanner.scan(
-									sourcePath,
-									session.policy(),
-									overlays,
-									allowance.deadlineNanos()
-							)
-							: DirectoryPackScanner.scan(
-									sourcePath,
-									session.policy(),
-									overlays,
-									allowance.deadlineNanos()
-							)
-					: new ShieldScanResult(
-							overlayValidation.reason(), 0, 0L, 0L
-					);
+			if (snapshot != null && snapshot.reason() != ShieldReason.NONE) {
+				result = new ShieldScanResult(snapshot.reason(), 0, 0L, 0L);
+			} else if (archive && snapshot == null && policy.rejectViolations()) {
+				// Settings can switch to reject mode after the supplier chose its source.
+				result = new ShieldScanResult(ShieldReason.MONITOR_FAILURE, 0, 0L, 0L);
+			} else if (!overlayValidation.accepted()) {
+				result = new ShieldScanResult(overlayValidation.reason(), 0, 0L, 0L);
+			} else if (archive) {
+				result = metadataOnly
+						? ZipPackScanner.scanMetadata(scanPath, policy, deadline)
+						: ZipPackScanner.scan(scanPath, policy, overlays, deadline);
+			} else if (metadataOnly) {
+				result = new ShieldScanResult(ShieldReason.NONE, 0, 0L, 0L);
+			} else {
+				result = DirectoryPackScanner.scan(scanPath, policy, overlays, deadline);
+			}
 		} catch (RuntimeException | java.io.IOException | StackOverflowError exception) {
 			result = new ShieldScanResult(ShieldReason.MONITOR_FAILURE, 0, 0L, 0L);
 		}
-		recordScan(source, result);
+		if (!metadataOnly) {
+			recordScan(source, result);
+		}
 		if (!result.accepted()) {
 			session.onViolation(result.reason());
 		}
-		return new ShieldedPackResources(delegate, session);
+		return new ShieldedPackResources(delegate, session, snapshot);
 	}
 
 	private static void recordScan(ShieldSourceKind source, ShieldScanResult result) {
@@ -299,42 +337,65 @@ public final class ResourcePackShieldEngine {
 		}
 		boolean monitorFailure = reason == ShieldReason.MONITOR_FAILURE;
 		boolean rejected = ShieldEnforcement.shouldReject(session.policy(), reason);
-		if (rejected) {
-			session.markRejected();
-		}
 		if (monitorFailure) {
 			saturatingIncrement(MONITOR_FAILURES);
 		} else {
 			saturatingIncrement(VIOLATIONS);
-			if (rejected) {
-				saturatingIncrement(REJECTIONS);
-			}
 		}
-		lastReason = reason;
-		lastSource = session.source();
-		lastEventLiveBytes = session.readBudget().consumedBytes();
-		long sequence = nextSequence(EVENT_SEQUENCE);
-		PENDING_NOTICE.set(new PendingNotice(
-				session.controlGeneration(),
-				sequence,
-				System.nanoTime(),
-				rejected,
-				monitorFailure
-		));
-		if (CONFIG.isWriteSanitizedLocalReport() && claimReportWrite(System.nanoTime())) {
-			ResourcePackShieldReportStore.write(new ResourcePackShieldReport(
-					reason,
-					session.source(),
-					rejected,
-					toBoundedInt(VIOLATIONS.get()),
-					toBoundedInt(PACKS_SCANNED.get()),
-					toBoundedInt(RESOURCES_SEEN.get()),
-					DECLARED_BYTES.get(),
-					session.readBudget().consumedBytes(),
-					toBoundedInt(MONITOR_FAILURES.get())
-			));
+		if (rejected) {
+			saturatingIncrement(REJECTIONS);
+		}
+		Diagnostic diagnostic = new Diagnostic(
+				session.controlGeneration(), reason, session.source(),
+				session.readBudget().consumedBytes(), rejected, monitorFailure
+		);
+		ResourcePackShieldReport report;
+		synchronized (RELOAD_DIAGNOSTICS_LOCK) {
+			if (rejected) {
+				session.markRejected();
+			}
+			boolean reloadActive = ACTIVE_RELOADS.get() != 0;
+			// Discovery can reject an oversized selected pack before Minecraft opens it,
+			// but it can also inspect unrelated packs during rollback. Keep it as a fallback.
+			if (reloadActive && session.metadataOnly()) {
+				if (!selectedDiagnosticPublished) {
+					deferredDiscovery = diagnostic;
+				}
+				return rejected;
+			}
+			if (reloadActive) {
+				selectedDiagnosticPublished = true;
+				deferredDiscovery = null;
+			}
+			report = publishDiagnostic(diagnostic, reloadActive);
+		}
+		if (report != null) {
+			ResourcePackShieldReportStore.write(report);
 		}
 		return rejected;
+	}
+
+	private static ResourcePackShieldReport publishDiagnostic(Diagnostic diagnostic, boolean reloadActive) {
+		lastReason = diagnostic.reason();
+		lastSource = diagnostic.source();
+		lastEventLiveBytes = diagnostic.liveBytes();
+		long sequence = nextSequence(EVENT_SEQUENCE);
+		long nowNanos = System.nanoTime();
+		PENDING_NOTICE.set(new PendingNotice(
+				diagnostic.controlGeneration(), sequence, nowNanos, diagnostic.rejected(), diagnostic.monitorFailure()
+		));
+		if (!reloadActive) {
+			READY_EVENT_SEQUENCE.accumulateAndGet(sequence, Math::max);
+		}
+		if (!CONFIG.isWriteSanitizedLocalReport() || !claimReportWrite(nowNanos)) {
+			return null;
+		}
+		return new ResourcePackShieldReport(
+				diagnostic.reason(), diagnostic.source(), diagnostic.rejected(),
+				toBoundedInt(VIOLATIONS.get()), toBoundedInt(PACKS_SCANNED.get()),
+				toBoundedInt(RESOURCES_SEEN.get()), DECLARED_BYTES.get(), diagnostic.liveBytes(),
+				toBoundedInt(MONITOR_FAILURES.get())
+		);
 	}
 
 	private static void completeReload(ReloadToken token) {
@@ -344,13 +405,22 @@ public final class ResourcePackShieldEngine {
 		if (token.controlGeneration() != CONTROL_GENERATION.get()) {
 			return;
 		}
-		ACTIVE_RELOADS.updateAndGet(value -> Math.max(0, value - 1));
-		if (ACTIVE_RELOADS.get() == 0) {
-			AGGREGATE_SCAN_DEADLINE_NANOS.set(0L);
+		ResourcePackShieldReport report = null;
+		synchronized (RELOAD_DIAGNOSTICS_LOCK) {
+			if (ACTIVE_RELOADS.decrementAndGet() == 0) {
+				AGGREGATE_SCAN_DEADLINE_NANOS.set(0L);
+				if (deferredDiscovery != null && runtimeEnabled) {
+					report = publishDiagnostic(deferredDiscovery, false);
+				}
+				deferredDiscovery = null;
+			}
+			long event = EVENT_SEQUENCE.get();
+			if (event > token.eventBaseline()) {
+				READY_EVENT_SEQUENCE.accumulateAndGet(event, Math::max);
+			}
 		}
-		long event = EVENT_SEQUENCE.get();
-		if (event > token.eventBaseline()) {
-			READY_EVENT_SEQUENCE.accumulateAndGet(event, Math::max);
+		if (report != null) {
+			ResourcePackShieldReportStore.write(report);
 		}
 	}
 
@@ -409,10 +479,10 @@ public final class ResourcePackShieldEngine {
 			return;
 		}
 		Component message = Component.translatable(
-				notice.monitorFailure()
-						? "sodium-volt.notification.resource_pack_shield.monitor_failure"
-						: notice.rejected()
-								? "sodium-volt.notification.resource_pack_shield.rejected"
+				notice.rejected()
+						? "sodium-volt.notification.resource_pack_shield.rejected"
+						: notice.monitorFailure()
+								? "sodium-volt.notification.resource_pack_shield.monitor_failure"
 								: "sodium-volt.notification.resource_pack_shield.monitored"
 		);
 		minecraft.gui.hud.setOverlayMessage(message, false);
@@ -444,6 +514,16 @@ public final class ResourcePackShieldEngine {
 			PENDING_NOTICE.set(null);
 			POLICY_RELOAD_PENDING.set(false);
 		}
+	}
+
+	private static ShieldScanBudget.Allowance packScanAllowance(
+			ResourcePackShieldPolicy policy, boolean metadataOnly
+	) {
+		// Discovery can inspect unselected packs. Each gets a bounded budget without
+		// consuming the active reload's budget or rejecting unrelated selected packs.
+		return metadataOnly
+				? ShieldScanBudget.allowance(policy, 0L, System.nanoTime(), false)
+				: scanAllowance(policy);
 	}
 
 	private static ShieldScanBudget.Allowance scanAllowance(
@@ -581,6 +661,16 @@ public final class ResourcePackShieldEngine {
 		void markRejected(long currentControlGeneration) {
 			this.rejection.reject(currentControlGeneration);
 		}
+	}
+
+	private record Diagnostic(
+			long controlGeneration,
+			ShieldReason reason,
+			ShieldSourceKind source,
+			long liveBytes,
+			boolean rejected,
+			boolean monitorFailure
+	) {
 	}
 
 	private record PendingNotice(

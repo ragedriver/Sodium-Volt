@@ -16,9 +16,9 @@ public record ProfileSettings(
 	public static final int ENTITY_DISTANCE_MIN = 50;
 	public static final int ENTITY_DISTANCE_MAX = 500;
 	public static final int ENTITY_DISTANCE_STEP = 25;
-	public static final int FRAMERATE_LIMIT_MIN = 30;
+	public static final int FRAMERATE_LIMIT_MIN = 10;
 	public static final int FRAMERATE_LIMIT_MAX = 260;
-	public static final int FRAMERATE_LIMIT_STEP = 5;
+	public static final int FRAMERATE_LIMIT_STEP = 10;
 
 	public ProfileSettings {
 		particleMode = Objects.requireNonNull(particleMode, "particleMode");
@@ -43,8 +43,7 @@ public record ProfileSettings(
 						SIMULATION_DISTANCE_MIN, SIMULATION_DISTANCE_MAX),
 				clampStep(this.entityDistancePercent,
 						ENTITY_DISTANCE_MIN, ENTITY_DISTANCE_MAX, ENTITY_DISTANCE_STEP),
-				clampStep(this.framerateLimit,
-						FRAMERATE_LIMIT_MIN, FRAMERATE_LIMIT_MAX, FRAMERATE_LIMIT_STEP),
+				sanitizeFramerateLimit(this.framerateLimit),
 				this.particleMode
 		);
 	}
@@ -89,6 +88,12 @@ public record ProfileSettings(
 						? this.particleMode : actual.particleMode
 		).sanitized();
 		return new RestoreResult(restored, !restored.equals(actual));
+	}
+
+	private static int sanitizeFramerateLimit(int value) {
+		// Minecraft floors values between slider steps. Retain the effective cap of older profiles.
+		return clamp(value, FRAMERATE_LIMIT_MIN, FRAMERATE_LIMIT_MAX)
+				/ FRAMERATE_LIMIT_STEP * FRAMERATE_LIMIT_STEP;
 	}
 
 	private static int clamp(int value, int minimum, int maximum) {

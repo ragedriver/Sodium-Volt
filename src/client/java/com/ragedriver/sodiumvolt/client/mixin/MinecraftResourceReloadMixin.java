@@ -2,6 +2,8 @@ package com.ragedriver.sodiumvolt.client.mixin;
 
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.llamalad7.mixinextras.sugar.Local;
 import com.ragedriver.sodiumvolt.client.inspector.VoltInspectorEngine;
 import com.ragedriver.sodiumvolt.client.performance.BlockEntityRenderBudgetEngine;
 import com.ragedriver.sodiumvolt.client.resourcepack.ResourcePackShieldEngine;
@@ -9,16 +11,25 @@ import com.ragedriver.sodiumvolt.client.resourcepack.ShieldReloadGate;
 import com.ragedriver.sodiumvolt.client.watchdog.GpuTimeoutWatchdogEngine;
 import net.minecraft.client.GameLoadCookie;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Gui;
+import net.minecraft.client.gui.screens.LoadingOverlay;
 import net.minecraft.util.Unit;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 @Mixin(Minecraft.class)
 public abstract class MinecraftResourceReloadMixin {
+	@Shadow @Final public Gui gui;
+	@Shadow private CompletableFuture<Void> pendingReload;
+
 	@Unique
 	private static final int SODIUM_VOLT_MAX_RELOAD_NESTING = 32;
 	@Unique
@@ -65,7 +76,11 @@ public abstract class MinecraftResourceReloadMixin {
 		try {
 			observation = VoltInspectorEngine.beginResourceReload();
 			watchdogToken = GpuTimeoutWatchdogEngine.beginResourceReload();
-			shieldToken = ResourcePackShieldEngine.beginResourceReload();
+			// Minecraft starts a queued request again on the client tick once the overlay clears.
+			// Start its scan budget then, rather than spending it while the request is waiting.
+			if (this.pendingReload == null && !(this.gui.overlay() instanceof LoadingOverlay)) {
+				shieldToken = ResourcePackShieldEngine.beginResourceReload();
+			}
 			this.sodiumVolt$currentPublicShieldToken = shieldToken;
 			this.sodiumVolt$publicShieldTokenAvailable = true;
 			future = original.call();
@@ -153,6 +168,55 @@ public abstract class MinecraftResourceReloadMixin {
 				}
 			}
 		}
+	}
+
+	@ModifyArg(
+			method = "reloadResourcePacks(ZLnet/minecraft/client/GameLoadCookie;)"
+					+ "Ljava/util/concurrent/CompletableFuture;",
+			at = @At(
+					value = "INVOKE",
+					target = "Lnet/minecraft/client/gui/screens/LoadingOverlay;<init>("
+							+ "Lnet/minecraft/client/Minecraft;Lnet/minecraft/server/packs/resources/ReloadInstance;"
+							+ "Ljava/util/function/Consumer;Z)V"
+			),
+			index = 2
+	)
+	private Consumer<Optional<Throwable>> sodiumVolt$settleFailedReload(
+			Consumer<Optional<Throwable>> onFinish,
+			@Local(ordinal = 0) CompletableFuture<Void> reload
+	) {
+		return result -> {
+			try {
+				onFinish.accept(result);
+			} finally {
+				// Vanilla settles this future on success but its failure branch only starts recovery.
+				if (result.isPresent()) {
+					reload.completeExceptionally(result.get());
+				}
+			}
+		};
+	}
+
+	@WrapOperation(
+			method = "runTick(Z)V",
+			at = @At(
+					value = "INVOKE",
+					target = "Ljava/util/concurrent/CompletableFuture;thenRun(Ljava/lang/Runnable;)"
+							+ "Ljava/util/concurrent/CompletableFuture;"
+			)
+	)
+	private CompletableFuture<Void> sodiumVolt$settleQueuedReload(
+			CompletableFuture<Void> started,
+			Runnable onSuccess,
+			Operation<CompletableFuture<Void>> original,
+			@Local(ordinal = 0) CompletableFuture<Void> queued
+	) {
+		started.whenComplete((ignored, failure) -> {
+			if (failure != null) {
+				queued.completeExceptionally(failure);
+			}
+		});
+		return original.call(started, onSuccess);
 	}
 
 	@ModifyArg(

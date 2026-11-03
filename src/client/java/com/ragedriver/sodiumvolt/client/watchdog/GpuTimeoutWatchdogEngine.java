@@ -24,7 +24,7 @@ public final class GpuTimeoutWatchdogEngine {
 	private static final AtomicLong CONTROL_GENERATION = new AtomicLong(1L);
 	private static final WatchdogReloadAccounting RELOAD_ACCOUNTING =
 			new WatchdogReloadAccounting(MAXIMUM_ACTIVE_RELOADS);
-	private static final AtomicLong RELOAD_GRACE_UNTIL_NANOS = new AtomicLong();
+	private static final AtomicReference<Long> RELOAD_GRACE_UNTIL_NANOS = new AtomicReference<>();
 	private static final AtomicReference<Signal> PENDING_SIGNAL = new AtomicReference<>();
 
 	private static volatile EngineSettings settings = EngineSettings.defaults();
@@ -37,6 +37,7 @@ public final class GpuTimeoutWatchdogEngine {
 	private static long observedConfigRevision = Long.MIN_VALUE;
 	private static long startupWorldGraceUntilNanos;
 	private static long lastNotificationNanos;
+	private static boolean notificationShown;
 	private static int previousLevelIdentity;
 
 	private GpuTimeoutWatchdogEngine() {
@@ -65,34 +66,55 @@ public final class GpuTimeoutWatchdogEngine {
 			return;
 		}
 
+		MONITORING_ALLOWED.set(updateMonitoringContext(minecraft, nowNanos));
+		publishHeartbeat(nowNanos);
+	}
+
+	public static boolean requiresRenderContextRefresh() {
+		return FRAME_GATE.runtimeEnabled();
+	}
+
+	public static void refreshRenderContext(Minecraft minecraft, long nowNanos) {
+		if (!IN_FRAME.get() || Thread.currentThread() != minecraft.getRunningThread()) {
+			return;
+		}
+		boolean allowed = updateMonitoringContext(minecraft, nowNanos);
+		if (allowed && !MONITORING_ALLOWED.get()) {
+			// The tick may have left a loading or paused state before rendering.
+			// Start measuring from that transition instead of counting the suppressed time.
+			IN_FRAME.set(false);
+			MONITORING_ALLOWED.set(true);
+			publishHeartbeat(nowNanos);
+		} else {
+			MONITORING_ALLOWED.set(allowed);
+		}
+	}
+
+	private static boolean updateMonitoringContext(Minecraft minecraft, long nowNanos) {
 		int levelIdentity = minecraft.level == null
 				? 0
 				: System.identityHashCode(minecraft.level);
 		if (levelIdentity != previousLevelIdentity) {
 			previousLevelIdentity = levelIdentity;
-			startupWorldGraceUntilNanos = saturatedAdd(
-					nowNanos,
-					settings.startupWorldGraceNanos()
-			);
+			startupWorldGraceUntilNanos = nowNanos + settings.startupWorldGraceNanos();
 		}
-		boolean grace = nowNanos < startupWorldGraceUntilNanos
+		Long reloadGraceUntil = RELOAD_GRACE_UNTIL_NANOS.get();
+		boolean grace = nowNanos - startupWorldGraceUntilNanos < 0L
 				|| RELOAD_ACCOUNTING.active() > 0
-				|| nowNanos < RELOAD_GRACE_UNTIL_NANOS.get();
+				|| reloadGraceUntil != null && nowNanos - reloadGraceUntil < 0L;
 		boolean suppressed = isSuppressed(minecraft);
-		boolean allowed = !grace && !suppressed;
-		MONITORING_ALLOWED.set(allowed);
 		status = grace
 				? WatchdogStatus.GRACE
 				: suppressed ? WatchdogStatus.SUPPRESSED : WatchdogStatus.MONITORING;
-		long sequence = FRAME_SEQUENCE.updateAndGet(
-				current -> current == Long.MAX_VALUE ? 1L : current + 1L
-		);
+		return !grace && !suppressed;
+	}
+
+	private static void publishHeartbeat(long nowNanos) {
+		FRAME_SEQUENCE.updateAndGet(current -> current == Long.MAX_VALUE ? 1L : current + 1L);
 		FRAME_START_NANOS.set(nowNanos);
-		// This publication is last so the daemon cannot observe a new frame with stale metadata.
-		if (sequence > 0L) {
-			IN_FRAME.set(true);
-			FRAME_GATE.publishHeartbeat();
-		}
+		// This publication is last so the daemon cannot observe new heartbeat data too early.
+		IN_FRAME.set(true);
+		FRAME_GATE.publishHeartbeat();
 	}
 
 	public static void onRenderFrameEnd(Minecraft minecraft, long nowNanos) {
@@ -195,11 +217,8 @@ public final class GpuTimeoutWatchdogEngine {
 				value -> value == Long.MAX_VALUE ? 1L : value + 1L
 		);
 		RELOAD_ACCOUNTING.reset();
-		RELOAD_GRACE_UNTIL_NANOS.set(0L);
-		startupWorldGraceUntilNanos = saturatedAdd(
-				nowNanos,
-				settings.startupWorldGraceNanos()
-		);
+		RELOAD_GRACE_UNTIL_NANOS.set(null);
+		startupWorldGraceUntilNanos = nowNanos + settings.startupWorldGraceNanos();
 		previousLevelIdentity = 0;
 		// Publish enabled last so a parked daemon cannot observe stale generation data.
 		LIFECYCLE.setEnabled(true);
@@ -227,7 +246,7 @@ public final class GpuTimeoutWatchdogEngine {
 		IN_FRAME.set(false);
 		MONITORING_ALLOWED.set(false);
 		RELOAD_ACCOUNTING.reset();
-		RELOAD_GRACE_UNTIL_NANOS.set(0L);
+		RELOAD_GRACE_UNTIL_NANOS.set(null);
 		PENDING_SIGNAL.set(null);
 		status = WatchdogStatus.OFF;
 	}
@@ -271,14 +290,13 @@ public final class GpuTimeoutWatchdogEngine {
 				);
 				continue;
 			}
-			int event = policy.evaluate(
-					System.nanoTime(),
-					IN_FRAME.get(),
-					MONITORING_ALLOWED.get(),
-					FRAME_START_NANOS.get(),
-					FRAME_SEQUENCE.get(),
-					current.policy()
-			);
+			long sequence = FRAME_SEQUENCE.get();
+			boolean activeAtStart = IN_FRAME.get();
+			long startNanos = FRAME_START_NANOS.get();
+			long nowNanos = System.nanoTime();
+			boolean allowed = MONITORING_ALLOWED.get();
+			boolean active = activeAtStart && IN_FRAME.get() && sequence == FRAME_SEQUENCE.get();
+			int event = policy.evaluate(nowNanos, active, allowed, startNanos, sequence, current.policy());
 			latestDurationMillis = policy.latestDurationMillis();
 			incidentCount = policy.incidents();
 			incidentCapReached = policy.capReached(current.policy());
@@ -354,8 +372,10 @@ public final class GpuTimeoutWatchdogEngine {
 			return;
 		}
 		long nowNanos = System.nanoTime();
-		long graceUntil = saturatedAdd(nowNanos, settings.resourceReloadGraceNanos());
-		RELOAD_GRACE_UNTIL_NANOS.accumulateAndGet(graceUntil, Math::max);
+		long graceUntil = nowNanos + settings.resourceReloadGraceNanos();
+		RELOAD_GRACE_UNTIL_NANOS.accumulateAndGet(graceUntil,
+				(previous, candidate) -> previous == null || candidate - previous > 0L ? candidate : previous
+		);
 	}
 
 	private static void showTransitionNotification(
@@ -368,11 +388,9 @@ public final class GpuTimeoutWatchdogEngine {
 				|| minecraft.gui.screen() != null || minecraft.gui.overlay() != null) {
 			return;
 		}
-		if (lastNotificationNanos != 0L && nowNanos < lastNotificationNanos) {
-			lastNotificationNanos = 0L;
-		}
-		if (lastNotificationNanos != 0L
-				&& nowNanos - lastNotificationNanos < NOTIFICATION_INTERVAL_NANOS) {
+		long sinceNotification = nowNanos - lastNotificationNanos;
+		if (notificationShown && sinceNotification >= 0L
+				&& sinceNotification < NOTIFICATION_INTERVAL_NANOS) {
 			return;
 		}
 		minecraft.gui.hud.setOverlayMessage(Component.translatable(
@@ -381,13 +399,7 @@ public final class GpuTimeoutWatchdogEngine {
 						: "sodium-volt.notification.watchdog.warning"
 		), false);
 		lastNotificationNanos = nowNanos;
-	}
-
-	private static long saturatedAdd(long value, long increment) {
-		if (increment <= 0L) {
-			return value;
-		}
-		return value > Long.MAX_VALUE - increment ? Long.MAX_VALUE : value + increment;
+		notificationShown = true;
 	}
 
 	private record EngineSettings(

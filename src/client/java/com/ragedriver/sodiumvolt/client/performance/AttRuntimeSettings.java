@@ -12,6 +12,7 @@ final class AttRuntimeSettings {
 		private boolean warmup;
 		private boolean collectStatistics;
 		private boolean keepInterfaceAtlasesFullSpeed;
+		private boolean interfaceProtected;
 		private boolean screenOpen;
 		private boolean pauseInvisibleAnimations;
 		private int unseenKeepaliveTicks;
@@ -45,6 +46,8 @@ final class AttRuntimeSettings {
 			this.warmup = warmup;
 			this.collectStatistics = collectStatistics;
 			this.keepInterfaceAtlasesFullSpeed = keepInterfaceAtlasesFullSpeed;
+			this.interfaceProtected = keepInterfaceAtlasesFullSpeed
+					&& !AttAtlasPolicy.isWorldAtlasTexture(atlasLocation);
 			this.screenOpen = screenOpen;
 			this.pauseInvisibleAnimations = pauseInvisibleAnimations;
 			this.unseenKeepaliveTicks = unseenKeepaliveTicks;
@@ -73,6 +76,10 @@ final class AttRuntimeSettings {
 
 		boolean keepInterfaceAtlasesFullSpeed() {
 			return this.keepInterfaceAtlasesFullSpeed;
+		}
+
+		boolean interfaceProtected() {
+			return this.interfaceProtected;
 		}
 
 		boolean screenOpen() {

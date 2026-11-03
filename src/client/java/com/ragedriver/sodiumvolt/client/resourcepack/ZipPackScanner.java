@@ -10,6 +10,8 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Set;
@@ -70,12 +72,25 @@ public final class ZipPackScanner {
 		return scan(archive, policy, overlays, deadline, hook);
 	}
 
+	static ShieldScanResult scanMetadata(
+			Path archive, ResourcePackShieldPolicy policy, long deadline
+	) throws IOException {
+		return scan(archive, policy, ShieldOverlayPlan.EMPTY, deadline, ZipScanHook.NONE, true);
+	}
+
 	private static ShieldScanResult scan(
 			Path archive,
 			ResourcePackShieldPolicy policy,
 			ShieldOverlayPlan overlays,
 			long deadline,
 			ZipScanHook hook
+	) throws IOException {
+		return scan(archive, policy, overlays, deadline, hook, false);
+	}
+
+	private static ShieldScanResult scan(
+			Path archive, ResourcePackShieldPolicy policy, ShieldOverlayPlan overlays,
+			long deadline, ZipScanHook hook, boolean metadataOnly
 	) throws IOException {
 		if (Files.isSymbolicLink(archive)) {
 			return failed(ShieldReason.SYMLINK, 0, 0L, 0L);
@@ -93,8 +108,9 @@ public final class ZipPackScanner {
 		try (FileChannel channel = FileChannel.open(
 				archive, Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
 		)) {
+			CharsetDecoder nameDecoder = StandardCharsets.UTF_8.newDecoder();
 			CentralDirectoryMetadata central = readCentralDirectory(
-					channel, archiveBytes, policy, deadline
+					channel, archiveBytes, policy, deadline, nameDecoder
 			);
 			if (central.reason() != ShieldReason.NONE) {
 				return failed(central.reason(), 0, 0L, 0L);
@@ -111,6 +127,9 @@ public final class ZipPackScanner {
 					return failed(ShieldReason.ENTRY_LIMIT, entries, total, inspected);
 				}
 				String name = entry.name();
+				if (metadataOnly && !name.equals("pack.mcmeta")) {
+					continue;
+				}
 				if (!ShieldPathPolicy.isStructurallySafeRelative(name)
 						|| policy.detectUnsafePaths()
 								&& !ShieldPathPolicy.isSafe(
@@ -145,7 +164,7 @@ public final class ZipPackScanner {
 				}
 				String lower = logicalPath.toLowerCase(Locale.ROOT);
 				if (lower.endsWith(".png")) {
-					try (InputStream input = openEntry(channel, entry, central.offset())) {
+					try (InputStream input = openEntry(channel, entry, central.offset(), nameDecoder)) {
 						ShieldReason reason = ShieldContentValidators.validatePng(input, policy);
 						inspected = saturatedAdd(inspected, Math.min(size, 24L));
 						if (reason != ShieldReason.NONE) {
@@ -156,7 +175,7 @@ public final class ZipPackScanner {
 					// Root metadata is a bootstrap exception: repository discovery may parse it
 					// before the wrapped live resource path exists. It is deliberately checked
 					// again live because this scan cannot prove later ZIP byte identity.
-					try (InputStream input = openEntry(channel, entry, central.offset())) {
+					try (InputStream input = openEntry(channel, entry, central.offset(), nameDecoder)) {
 						ShieldReason reason = ShieldContentValidators.validateJson(
 								input,
 								policy.maximumSingleResourceBytes(),
@@ -224,7 +243,7 @@ public final class ZipPackScanner {
 		try (FileChannel channel = FileChannel.open(
 				archive, Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
 		)) {
-			return readCentralDirectory(channel, fileSize, policy, deadline);
+			return readCentralDirectory(channel, fileSize, policy, deadline, StandardCharsets.UTF_8.newDecoder());
 		}
 	}
 
@@ -232,7 +251,8 @@ public final class ZipPackScanner {
 			FileChannel channel,
 			long fileSize,
 			ResourcePackShieldPolicy policy,
-			long deadline
+			long deadline,
+			CharsetDecoder nameDecoder
 	) throws IOException {
 		if (fileSize < END_HEADER_LENGTH) {
 			return CentralDirectoryMetadata.failed(ShieldReason.UNKNOWN_METADATA);
@@ -327,7 +347,7 @@ public final class ZipPackScanner {
 				}
 				byte[] nameBytes = reader.readBytes(nameLength);
 				reader.skip((long) extraLength + commentLength);
-				String name = decodeName(nameBytes);
+				String name = decodeName(nameDecoder, nameBytes);
 				if (name == null) {
 					return CentralDirectoryMetadata.failed(ShieldReason.UNKNOWN_METADATA);
 				}
@@ -452,8 +472,19 @@ public final class ZipPackScanner {
 
 		private byte[] readBytes(int count) throws IOException {
 			byte[] result = new byte[count];
-			for (int index = 0; index < count; index++) {
-				result[index] = (byte) readByte();
+			if (count > this.remaining) {
+				throw new IOException("Unexpected end of ZIP central directory");
+			}
+			int copied = 0;
+			while (copied < count) {
+				if (this.offset == this.limit) {
+					refill();
+				}
+				int chunk = Math.min(count - copied, this.limit - this.offset);
+				System.arraycopy(this.buffer, this.offset, result, copied, chunk);
+				this.offset += chunk;
+				this.remaining -= chunk;
+				copied += chunk;
 			}
 			return result;
 		}
@@ -476,14 +507,10 @@ public final class ZipPackScanner {
 		}
 	}
 
-	private static String decodeName(byte[] bytes) {
+	private static String decodeName(CharsetDecoder decoder, byte[] bytes) {
 		try {
-			return StandardCharsets.UTF_8.newDecoder()
-					.onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-					.onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
-					.decode(java.nio.ByteBuffer.wrap(bytes))
-					.toString();
-		} catch (java.nio.charset.CharacterCodingException exception) {
+			return decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString();
+		} catch (CharacterCodingException exception) {
 			return null;
 		}
 	}
@@ -491,7 +518,8 @@ public final class ZipPackScanner {
 	private static InputStream openEntry(
 			FileChannel channel,
 			CentralEntry entry,
-			long centralOffset
+			long centralOffset,
+			CharsetDecoder nameDecoder
 	) throws IOException {
 		byte[] header = new byte[LOCAL_HEADER_LENGTH];
 		readFully(channel, header, entry.localOffset());
@@ -510,23 +538,25 @@ public final class ZipPackScanner {
 		}
 		byte[] localName = new byte[nameLength];
 		readFully(channel, localName, entry.localOffset() + LOCAL_HEADER_LENGTH);
-		String decodedName = decodeName(localName);
+		String decodedName = decodeName(nameDecoder, localName);
 		if (!entry.name().equals(decodedName)) {
 			throw new IOException("ZIP local entry name does not match central metadata");
 		}
 		InputStream slice = new ChannelSliceInputStream(
 				channel, dataOffset, entry.compressedSize()
 		);
-		InputStream decodedStream = entry.method() == ZipEntry.STORED
+		Inflater inflater = entry.method() == ZipEntry.STORED ? null : new Inflater(true);
+		InputStream decodedStream = inflater == null
 				? slice
-				: new InflaterInputStream(slice, new Inflater(true), 8_192);
+				: new InflaterInputStream(slice, inflater, 8_192);
 		return new EntryVerifyingInputStream(
-				decodedStream, entry.size(), entry.crc()
+				decodedStream, inflater, entry.size(), entry.crc()
 		);
 	}
 
 	private static final class EntryVerifyingInputStream extends InputStream {
 		private final InputStream delegate;
+		private final Inflater inflater;
 		private final long expectedSize;
 		private final long expectedCrc;
 		private final CRC32 crc = new CRC32();
@@ -534,9 +564,10 @@ public final class ZipPackScanner {
 		private boolean verified;
 
 		private EntryVerifyingInputStream(
-				InputStream delegate, long expectedSize, long expectedCrc
+				InputStream delegate, Inflater inflater, long expectedSize, long expectedCrc
 		) {
 			this.delegate = delegate;
+			this.inflater = inflater;
 			this.expectedSize = expectedSize;
 			this.expectedCrc = expectedCrc;
 		}
@@ -567,7 +598,13 @@ public final class ZipPackScanner {
 
 		@Override
 		public void close() throws IOException {
-			this.delegate.close();
+			try {
+				this.delegate.close();
+			} finally {
+				if (this.inflater != null) {
+					this.inflater.end();
+				}
+			}
 		}
 
 		private void verify() throws IOException {
