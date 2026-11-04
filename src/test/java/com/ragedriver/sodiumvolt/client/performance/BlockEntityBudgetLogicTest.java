@@ -12,6 +12,7 @@ public final class BlockEntityBudgetLogicTest {
         testFreshExtractionCadence();
         testCacheValidationAndExpiry();
         testCacheEvictionShrinkAndRelease();
+        testCacheDeletionAcrossTableBoundary();
         testGlobalAndPerTypeQuotas();
         testProtectedAndBreakingReserves();
         testDownstreamGuardComposition();
@@ -130,6 +131,11 @@ public final class BlockEntityBudgetLogicTest {
                 BlockEntityBudgetNormalization.normalizeDistances(100, 10, 50);
         check(crossed.near() == 64 && crossed.medium() == 64 && crossed.far() == 64,
                 "saved distances must clamp and normalize to near <= medium <= far");
+
+        BlockEntityBudgetNormalization.Distances stepped =
+                BlockEntityBudgetNormalization.normalizeDistances(24, 52, 48);
+        check(stepped.medium() == 52 && stepped.far() == 56,
+                "a raised far distance must remain on its eight-block slider step");
 
         BlockEntityBudgetNormalization.Distances minimums =
                 BlockEntityBudgetNormalization.normalizeDistances(-100, -100, -100);
@@ -258,6 +264,37 @@ public final class BlockEntityBudgetLogicTest {
         cache.put(9L, secondEntity, secondState, type, blockState, 101L, 4);
         check(cache.lookup(9L, secondEntity, type, blockState, 101L, 40) == secondState,
                 "cache must remain reusable after clearing tombstones");
+    }
+
+    private static void testCacheDeletionAcrossTableBoundary() {
+        var cache = new BoundedBlockEntityStateCache<Object, Object, Object, Object>();
+        Object entity = new Object();
+        Object type = new Object();
+        Object block = new Object();
+        Object first = new Object();
+        Object second = new Object();
+        Object third = new Object();
+        Object fourth = new Object();
+        // The first two positions hash to slot 8190, the third to 8191,
+        // and the fourth to 0. Deleting the first shifts across slot 0.
+        cache.put(27659L, entity, first, type, block, 10L, 4);
+        cache.put(29781L, entity, second, type, block, 11L, 4);
+        cache.put(8798L, entity, third, type, block, 12L, 4);
+        cache.put(0L, entity, fourth, type, block, 13L, 4);
+        check(cache.lookup(8798L, entity, type, block, 25L, 20) == third,
+                "using the cached state must renew only its expiry");
+        check(cache.lookup(27659L, new Object(), type, block, 26L, 20) == null
+                        && cache.lastFreshTickForLookup() == Long.MIN_VALUE,
+                "rejecting a stale identity must clear the last lookup");
+        check(cache.lookup(29781L, entity, type, block, 26L, 20) == second,
+                "a moved entry must still be reachable from its original hash");
+        check(cache.lookup(8798L, entity, type, block, 33L, 20) == third
+                        && cache.lastFreshTickForLookup() == 12L,
+                "moving a wrapped entry must preserve freshness and expiry independently");
+        check(cache.lookup(0L, entity, type, block, 33L, 20) == fourth,
+                "the final wrapped entry must retain its original render state");
+        check(cache.expire(60L, 20, 4) == 3 && cache.size() == 0,
+                "the occupancy index must still reach every moved entry");
     }
 
     private static void testGlobalAndPerTypeQuotas() {

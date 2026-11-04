@@ -6,9 +6,12 @@ public final class VramConfigNormalization {
 
 	public static Thresholds normalizeThresholds(int protection, int critical) {
 		int safeProtection = clamp(protection, 60, 90);
-		int minimumCritical = Math.min(98, safeProtection + 5);
-		int safeCritical = Math.max(minimumCritical, clamp(critical, 75, 98));
+		int safeCritical = Math.max(minimumCriticalThreshold(safeProtection), clamp(critical, 75, 98));
 		return new Thresholds(safeProtection, safeCritical);
+	}
+
+	public static int minimumCriticalThreshold(int protection) {
+		return Math.max(75, protection + 5);
 	}
 
 	public static int clampStep(int value, int minimum, int maximum, int step) {

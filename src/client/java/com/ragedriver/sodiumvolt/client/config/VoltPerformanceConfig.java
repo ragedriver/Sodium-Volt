@@ -612,9 +612,10 @@ public final class VoltPerformanceConfig {
 		if (this.berpMediumDistance < this.berpNearDistance) {
 			this.berpMediumDistance = this.berpNearDistance;
 		}
-		if (this.berpFarRenderDistance < this.berpMediumDistance) {
-			this.berpFarRenderDistance = this.berpMediumDistance;
-		}
+		this.berpFarRenderDistance = Math.max(
+				this.berpFarRenderDistance,
+				BlockEntityBudgetNormalization.minimumFarDistance(this.berpMediumDistance)
+		);
 	}
 
 	public int getBerpMediumDistance() {
@@ -631,9 +632,10 @@ public final class VoltPerformanceConfig {
 						BERP_MEDIUM_DISTANCE_STEP
 				)
 		);
-		if (this.berpFarRenderDistance < this.berpMediumDistance) {
-			this.berpFarRenderDistance = this.berpMediumDistance;
-		}
+		this.berpFarRenderDistance = Math.max(
+				this.berpFarRenderDistance,
+				BlockEntityBudgetNormalization.minimumFarDistance(this.berpMediumDistance)
+		);
 	}
 
 	public int getBerpMediumUpdateInterval() {
@@ -658,7 +660,7 @@ public final class VoltPerformanceConfig {
 
 	public void setBerpFarRenderDistance(int value) {
 		this.berpFarRenderDistance = Math.max(
-				this.berpMediumDistance,
+				BlockEntityBudgetNormalization.minimumFarDistance(this.berpMediumDistance),
 				clampToStep(
 						value,
 						BERP_FAR_DISTANCE_MIN,

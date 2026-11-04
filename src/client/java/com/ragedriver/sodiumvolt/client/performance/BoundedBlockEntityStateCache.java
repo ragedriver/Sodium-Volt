@@ -37,7 +37,6 @@ final class BoundedBlockEntityStateCache<E, S, T, B> {
 				|| this.blockStates[slot] != blockState
 				|| BlockEntityCadenceLogic.elapsed(gameTick, this.usedTicks[slot]) > Math.max(1, ttlTicks)) {
 			removeSlot(slot);
-			this.lastLookupSlot = -1;
 			return null;
 		}
 		this.usedTicks[slot] = gameTick;
@@ -110,9 +109,11 @@ final class BoundedBlockEntityStateCache<E, S, T, B> {
 	}
 
 	void clear() {
-		while (this.size > 0) {
-			removeSlot(this.occupiedSlots[this.size - 1]);
+		for (int index = 0; index < this.size; index++) {
+			clearSlot(this.occupiedSlots[index]);
+			this.occupiedSlots[index] = 0;
 		}
+		this.size = 0;
 		Arrays.fill(this.status, EMPTY);
 		this.evictionCursor = 0;
 		this.sweepCursor = 0;
@@ -190,7 +191,51 @@ final class BoundedBlockEntityStateCache<E, S, T, B> {
 		this.occupiedIndices[lastSlot] = occupiedIndex;
 		this.occupiedSlots[this.size - 1] = 0;
 		this.size--;
-		this.status[slot] = TOMBSTONE;
+		this.lastLookupSlot = -1;
+		if (this.sweepCursor > this.size) {
+			this.sweepCursor = this.size;
+		}
+
+		// Fill the hole with entries whose probe path crosses it. This reclaims
+		// ordinary deletions without a table-wide cleanup or new allocations.
+		int hole = slot;
+		int scan = slot;
+		for (int probe = 0; probe < MAX_PROBES; probe++) {
+			scan = (scan + 1) & TABLE_MASK;
+			if (this.status[scan] == EMPTY) {
+				this.status[hole] = EMPTY;
+				clearSlot(hole);
+				return;
+			}
+			if (this.status[scan] == OCCUPIED) {
+				int home = mix(this.positions[scan]) & TABLE_MASK;
+				if (((hole - home) & TABLE_MASK) < ((scan - home) & TABLE_MASK)) {
+					moveSlot(scan, hole);
+					hole = scan;
+				}
+			}
+		}
+		// A cluster can outlive this deletion's probe budget. Keep its remaining
+		// keys reachable when the last hole is too close to the scan boundary.
+		this.status[hole] = ((scan - hole) & TABLE_MASK) >= MAX_PROBES - 1 ? EMPTY : TOMBSTONE;
+		clearSlot(hole);
+	}
+
+	private void moveSlot(int source, int destination) {
+		this.status[destination] = OCCUPIED;
+		this.positions[destination] = this.positions[source];
+		this.entities[destination] = this.entities[source];
+		this.states[destination] = this.states[source];
+		this.types[destination] = this.types[source];
+		this.blockStates[destination] = this.blockStates[source];
+		this.freshTicks[destination] = this.freshTicks[source];
+		this.usedTicks[destination] = this.usedTicks[source];
+		int occupiedIndex = this.occupiedIndices[source];
+		this.occupiedIndices[destination] = occupiedIndex;
+		this.occupiedSlots[occupiedIndex] = destination;
+	}
+
+	private void clearSlot(int slot) {
 		this.positions[slot] = 0L;
 		this.entities[slot] = null;
 		this.states[slot] = null;
@@ -199,10 +244,6 @@ final class BoundedBlockEntityStateCache<E, S, T, B> {
 		this.freshTicks[slot] = 0L;
 		this.usedTicks[slot] = 0L;
 		this.occupiedIndices[slot] = 0;
-		this.lastLookupSlot = -1;
-		if (this.sweepCursor > this.size) {
-			this.sweepCursor = this.size;
-		}
 	}
 
 	private static int mix(long value) {

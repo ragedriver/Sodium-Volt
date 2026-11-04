@@ -5,12 +5,16 @@ import com.ragedriver.sodiumvolt.client.profile.PerformanceProfileEngine;
 import com.ragedriver.sodiumvolt.client.profile.ProfileParticleMode;
 import com.ragedriver.sodiumvolt.client.profile.ProfileSettings;
 import com.ragedriver.sodiumvolt.client.profile.VoltFactoryReset;
+import com.ragedriver.sodiumvolt.client.performance.BlockEntityBudgetNormalization;
 import com.ragedriver.sodiumvolt.client.performance.VoltTunerProfile;
 import com.ragedriver.sodiumvolt.client.performance.VoltTunerProfileController;
+import com.ragedriver.sodiumvolt.client.performance.VramAllocationTracker;
+import com.ragedriver.sodiumvolt.client.performance.VramConfigNormalization;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
 import net.caffeinemc.mods.sodium.api.config.ConfigState;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
 import net.caffeinemc.mods.sodium.api.config.option.OptionImpact;
+import net.caffeinemc.mods.sodium.api.config.option.SteppedValidator;
 import net.caffeinemc.mods.sodium.api.config.structure.BooleanOptionBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
 import net.caffeinemc.mods.sodium.api.config.structure.EnumOptionBuilder;
@@ -26,6 +30,7 @@ import net.minecraft.resources.Identifier;
 
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 
 public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 	private static final Identifier ICON = Identifier.parse("sodium-volt:icon.png");
@@ -55,7 +60,7 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 	private static final Identifier FRAME_SAMPLE_WINDOW = optionId("frame_sample_window");
 	private static final Identifier SPIKE_THRESHOLD = optionId("spike_threshold");
 	private static final Identifier APC_ENABLED = optionId("apc_enabled");
-	private static final Identifier VOLT_TUNER_PROFILE = optionId("volt_tuner_profile");
+	public static final Identifier VOLT_TUNER_PROFILE = optionId("volt_tuner_profile");
 	private static final Identifier APC_PROFILE = optionId("apc_profile");
 	private static final Identifier APC_TARGET_FPS = optionId("apc_target_fps");
 	private static final Identifier APC_RENDER_DISTANCE = optionId("apc_render_distance");
@@ -65,8 +70,8 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 	private static final Identifier APC_ANIMATION_THROTTLING = optionId("apc_animation_throttling");
 	private static final Identifier APC_RESTORE_SETTINGS = optionId("apc_restore_settings");
 	private static final Identifier APC_NOTIFICATIONS = optionId("apc_notifications");
-	private static final Identifier APC_MIN_RENDER_DISTANCE = optionId("apc_min_render_distance");
-	private static final Identifier APC_MAX_RENDER_DISTANCE = optionId("apc_max_render_distance");
+	public static final Identifier APC_MIN_RENDER_DISTANCE = optionId("apc_min_render_distance");
+	public static final Identifier APC_MAX_RENDER_DISTANCE = optionId("apc_max_render_distance");
 	private static final Identifier APC_ADJUSTMENT_INTERVAL = optionId("apc_adjustment_interval");
 	private static final Identifier APC_RECOVERY_DELAY = optionId("apc_recovery_delay");
 	private static final Identifier APC_FPS_TOLERANCE = optionId("apc_fps_tolerance");
@@ -682,8 +687,8 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 											case COMPETITIVE -> Component.translatable(
 													"sodium-volt.options.performance.tuner.competitive.tooltip"
 											);
-											case AGGRESSIVE -> Component.translatable(
-													"sodium-volt.options.performance.tuner.aggressive.tooltip"
+											case AGGRESSIVE -> withVramAvailability(
+													"sodium-volt.options.performance.tuner.aggressive.tooltip", true
 											);
 										})
 										.setImpact(OptionImpact.VARIES)
@@ -1303,7 +1308,15 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 													BERP_ENABLED,
 													BERP_DISTANCE_AWARE_UPDATES
 											))
-									.addOption(builder.createIntegerOption(BERP_MEDIUM_DISTANCE)
+									.addOption(withDependentMinimum(
+												builder.createIntegerOption(BERP_MEDIUM_DISTANCE),
+												state -> BlockEntityBudgetNormalization.minimumMediumDistance(
+														state.readIntOption(BERP_NEAR_DISTANCE)),
+												VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_MAX,
+												VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_STEP,
+												VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_DEFAULT,
+												BERP_NEAR_DISTANCE
+										)
 											.setName(Component.translatable(
 													"sodium-volt.options.performance.berp.medium_distance"
 											))
@@ -1311,15 +1324,9 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 													"sodium-volt.options.performance.berp.medium_distance.tooltip"
 											))
 											.setImpact(OptionImpact.HIGH)
-											.setRange(
-													VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_MIN,
-													VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_MAX,
-													VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_STEP
-											)
 											.setValueFormatter(value -> Component.translatable(
 													"sodium-volt.options.performance.berp.blocks.value", value
 											))
-											.setDefaultValue(VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_DEFAULT)
 											.setStorageHandler(PERFORMANCE_STORAGE_HANDLER)
 											.setBinding(
 													PERFORMANCE_CONFIG::setBerpMediumDistance,
@@ -1391,7 +1398,16 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 													BERP_DISTANCE_AWARE_UPDATES,
 													BERP_CACHE_FAR_STATES
 											))
-									.addOption(builder.createIntegerOption(BERP_FAR_DISTANCE)
+									.addOption(withDependentMinimum(
+												builder.createIntegerOption(BERP_FAR_DISTANCE),
+												state -> BlockEntityBudgetNormalization.minimumFarDistance(Math.max(
+														state.readIntOption(BERP_NEAR_DISTANCE),
+														state.readIntOption(BERP_MEDIUM_DISTANCE))),
+												VoltPerformanceConfig.BERP_FAR_DISTANCE_MAX,
+												VoltPerformanceConfig.BERP_FAR_DISTANCE_STEP,
+												VoltPerformanceConfig.BERP_FAR_DISTANCE_DEFAULT,
+												BERP_NEAR_DISTANCE, BERP_MEDIUM_DISTANCE
+										)
 											.setName(Component.translatable(
 													"sodium-volt.options.performance.berp.far_distance"
 											))
@@ -1399,15 +1415,9 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 													"sodium-volt.options.performance.berp.far_distance.tooltip"
 											))
 											.setImpact(OptionImpact.HIGH)
-											.setRange(
-													VoltPerformanceConfig.BERP_FAR_DISTANCE_MIN,
-													VoltPerformanceConfig.BERP_FAR_DISTANCE_MAX,
-													VoltPerformanceConfig.BERP_FAR_DISTANCE_STEP
-											)
 											.setValueFormatter(value -> Component.translatable(
 													"sodium-volt.options.performance.berp.blocks.value", value
 											))
-											.setDefaultValue(VoltPerformanceConfig.BERP_FAR_DISTANCE_DEFAULT)
 											.setStorageHandler(PERFORMANCE_STORAGE_HANDLER)
 											.setBinding(
 													PERFORMANCE_CONFIG::setBerpFarRenderDistance,
@@ -1733,8 +1743,8 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 											.setName(Component.translatable(
 													"sodium-volt.options.performance.vram.enabled"
 											))
-											.setTooltip(Component.translatable(
-													"sodium-volt.options.performance.vram.enabled.tooltip"
+											.setTooltip(enabled -> withVramAvailability(
+													"sodium-volt.options.performance.vram.enabled.tooltip", enabled
 											))
 											.setImpact(OptionImpact.VARIES)
 											.setDefaultValue(false)
@@ -1833,7 +1843,15 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 											.setEnabledProvider(
 													state -> state.readBooleanOption(VRAM_ENABLED), VRAM_ENABLED
 											))
-									.addOption(builder.createIntegerOption(VRAM_CRITICAL_THRESHOLD)
+									.addOption(withDependentMinimum(
+												builder.createIntegerOption(VRAM_CRITICAL_THRESHOLD),
+												state -> VramConfigNormalization.minimumCriticalThreshold(
+														state.readIntOption(VRAM_PROTECTION_THRESHOLD)),
+												VoltPerformanceConfig.VRAM_CRITICAL_THRESHOLD_MAX,
+												1,
+												VoltPerformanceConfig.VRAM_CRITICAL_THRESHOLD_DEFAULT,
+												VRAM_PROTECTION_THRESHOLD
+										)
 											.setName(Component.translatable(
 													"sodium-volt.options.performance.vram.critical_threshold"
 											))
@@ -1841,17 +1859,9 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 													"sodium-volt.options.performance.vram.critical_threshold.tooltip"
 											))
 											.setImpact(OptionImpact.HIGH)
-											.setRange(
-													VoltPerformanceConfig.VRAM_CRITICAL_THRESHOLD_MIN,
-													VoltPerformanceConfig.VRAM_CRITICAL_THRESHOLD_MAX,
-													1
-											)
 											.setValueFormatter(value -> Component.translatable(
 													"sodium-volt.options.performance.vram.percent.value", value
 											))
-											.setDefaultValue(
-													VoltPerformanceConfig.VRAM_CRITICAL_THRESHOLD_DEFAULT
-											)
 											.setStorageHandler(PERFORMANCE_STORAGE_HANDLER)
 											.setBinding(
 													PERFORMANCE_CONFIG::setVramCriticalThresholdPercent,
@@ -2746,17 +2756,24 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 											WATCHDOG_CONFIG::setWarningStallThresholdSeconds,
 											WATCHDOG_CONFIG::getWarningStallThresholdSeconds
 									))
-									.addOption(watchdogIntegerOption(
-											builder,
-											WATCHDOG_CRITICAL_THRESHOLD,
-											"critical_threshold",
-											GpuWatchdogConfig.CRITICAL_THRESHOLD_MIN,
+									.addOption(withDependentMinimum(
+											watchdogIntegerOption(
+													builder,
+													WATCHDOG_CRITICAL_THRESHOLD,
+													"critical_threshold",
+													GpuWatchdogConfig.CRITICAL_THRESHOLD_MIN,
+													GpuWatchdogConfig.CRITICAL_THRESHOLD_MAX,
+													1,
+													GpuWatchdogConfig.CRITICAL_THRESHOLD_DEFAULT,
+													"seconds.value",
+													WATCHDOG_CONFIG::setCriticalTimeoutThresholdSeconds,
+													WATCHDOG_CONFIG::getCriticalTimeoutThresholdSeconds
+											),
+											state -> state.readIntOption(WATCHDOG_WARNING_THRESHOLD) + 1,
 											GpuWatchdogConfig.CRITICAL_THRESHOLD_MAX,
 											1,
 											GpuWatchdogConfig.CRITICAL_THRESHOLD_DEFAULT,
-											"seconds.value",
-											WATCHDOG_CONFIG::setCriticalTimeoutThresholdSeconds,
-											WATCHDOG_CONFIG::getCriticalTimeoutThresholdSeconds
+											WATCHDOG_WARNING_THRESHOLD
 									))
 									.addOption(watchdogIntegerOption(
 											builder,
@@ -3886,7 +3903,41 @@ public final class SodiumVoltConfigEntryPoint implements ConfigEntryPoint {
 				);
 	}
 
-	private static net.caffeinemc.mods.sodium.api.config.structure.IntegerOptionBuilder watchdogIntegerOption(
+	private static Component withVramAvailability(String tooltipKey, boolean enabled) {
+		var tooltip = Component.translatable(tooltipKey);
+		if (enabled && !VramAllocationTracker.hasCompleteBaseline()) {
+			tooltip.append(" ").append(Component.translatable(
+					"sodium-volt.options.performance.vram.restart_required"
+			));
+		}
+		return tooltip;
+	}
+
+	private static IntegerOptionBuilder withDependentMinimum(
+			IntegerOptionBuilder option,
+			ToIntFunction<ConfigState> minimum,
+			int maximum,
+			int step,
+			int defaultValue,
+			Identifier... dependencies
+	) {
+		return option.setRangeProvider(
+				state -> new DependentMinimumRange(minimum.applyAsInt(state), maximum, step),
+				dependencies
+		).setDefaultProvider(
+				state -> Math.max(defaultValue, minimum.applyAsInt(state)),
+				dependencies
+		);
+	}
+
+	public record DependentMinimumRange(int min, int max, int step) implements SteppedValidator {
+		@Override
+		public Integer getValidatedValue(Integer value, Supplier<Integer> defaultValue) {
+			return value < this.min ? this.min : SteppedValidator.super.getValidatedValue(value, defaultValue);
+		}
+	}
+
+	private static IntegerOptionBuilder watchdogIntegerOption(
 			ConfigBuilder builder,
 			Identifier id,
 			String translationPath,

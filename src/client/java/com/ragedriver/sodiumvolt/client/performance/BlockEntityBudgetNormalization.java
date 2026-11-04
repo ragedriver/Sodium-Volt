@@ -14,7 +14,7 @@ public final class BlockEntityBudgetNormalization {
 				VoltPerformanceConfig.BERP_NEAR_DISTANCE_STEP
 		);
 		int normalizedMedium = Math.max(
-				normalizedNear,
+				minimumMediumDistance(normalizedNear),
 				clampToStep(
 						medium,
 						VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_MIN,
@@ -23,7 +23,7 @@ public final class BlockEntityBudgetNormalization {
 				)
 		);
 		int normalizedFar = Math.max(
-				normalizedMedium,
+				minimumFarDistance(normalizedMedium),
 				clampToStep(
 						far,
 						VoltPerformanceConfig.BERP_FAR_DISTANCE_MIN,
@@ -32,6 +32,17 @@ public final class BlockEntityBudgetNormalization {
 				)
 		);
 		return new Distances(normalizedNear, normalizedMedium, normalizedFar);
+	}
+
+	public static int minimumMediumDistance(int near) {
+		return Math.max(VoltPerformanceConfig.BERP_MEDIUM_DISTANCE_MIN, near);
+	}
+
+	public static int minimumFarDistance(int medium) {
+		int minimum = VoltPerformanceConfig.BERP_FAR_DISTANCE_MIN;
+		int step = VoltPerformanceConfig.BERP_FAR_DISTANCE_STEP;
+		int offset = Math.max(0, medium - minimum);
+		return minimum + (offset + step - 1) / step * step;
 	}
 
 	private static int clampToStep(int value, int minimum, int maximum, int step) {

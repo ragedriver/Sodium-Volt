@@ -358,6 +358,8 @@ public final class VoltInspectorEngine {
 		SceneSnapshot scene = sceneSnapshot;
 		FrameTimeWindow.Statistics statistics = frameStatistics;
 		ChunkSnapshot chunks = chunkSnapshot;
+		VulkanChunkUploadProfiler.Snapshot vulkanUploads = CONFIG.isChunkActivity()
+				? VulkanChunkUploadProfiler.snapshot() : null;
 		ParticleSnapshot particles = particleSnapshot;
 		GcSnapshot gc = gcSnapshot;
 		double gpuUtilization = gpuUtilizationSnapshot;
@@ -383,6 +385,7 @@ public final class VoltInspectorEngine {
 		fingerprint = InspectorHudContentGate.mix(fingerprint, shield);
 		fingerprint = InspectorHudContentGate.mix(fingerprint, statistics);
 		fingerprint = InspectorHudContentGate.mix(fingerprint, chunks);
+		fingerprint = InspectorHudContentGate.mix(fingerprint, vulkanUploads);
 		fingerprint = InspectorHudContentGate.mix(fingerprint, scene);
 		fingerprint = InspectorHudContentGate.mix(fingerprint, particles);
 		fingerprint = InspectorHudContentGate.mix(fingerprint, schedulerStats);
@@ -416,7 +419,7 @@ public final class VoltInspectorEngine {
 		fingerprint = InspectorHudContentGate.mix(fingerprint, optionBits);
 		fingerprint = InspectorHudContentGate.mix(fingerprint, CONFIG.getSpikeThresholdMs());
 		InspectorHudContentKey exactKey = new InspectorHudContentKey(
-				smartFps, recovery, watchdog, shield, statistics, chunks, scene, particles,
+				smartFps, recovery, watchdog, shield, statistics, chunks, vulkanUploads, scene, particles,
 				schedulerStats, blockEntityStats, textureStats, vramStats, gc,
 				Double.doubleToLongBits(gpuUtilization), animatedTextureSnapshot,
 				rendererLine, driverLine, reload, optionBits, CONFIG.getSpikeThresholdMs()
@@ -515,6 +518,14 @@ public final class VoltInspectorEngine {
 					+ ", terrain " + (chunks.terrainComplete ? "settled" : "updating")
 					+ freshness(InspectorRefreshCadence.FRAME_AND_CHUNKS, chunkSnapshotReady));
 			addLine(lines, chunks.activity);
+			if (vulkanUploads != null) {
+				addLine(lines, "VK upload totals: " + formatVulkanStagingCopies(
+						vulkanUploads.copies(), vulkanUploads.overflowCopies(), vulkanUploads.overflowBytes()));
+				addVulkanUploadSample(lines, "Slowest render", vulkanUploads.slowestRender());
+				if (vulkanUploads.slowestUpload() != null) {
+					addVulkanUploadSample(lines, "Peak upload", vulkanUploads.slowestUpload());
+				}
+			}
 		}
 
 		if (CONFIG.isSceneComplexity()) {
@@ -886,6 +897,22 @@ public final class VoltInspectorEngine {
 		} catch (RuntimeException exception) {
 			return -1.0D;
 		}
+	}
+
+	private static void addVulkanUploadSample(
+			ArrayList<String> lines, String label, VulkanChunkUploadProfiler.Sample sample
+	) {
+		addLine(lines, String.format(
+				Locale.ROOT, "  %s: render %.2f ms, upload wall time %.2f ms",
+				label, sample.renderNanos() / 1_000_000.0D, sample.uploadNanos() / 1_000_000.0D
+		));
+		addLine(lines, "    " + formatVulkanStagingCopies(
+				sample.copies(), sample.overflowCopies(), sample.overflowBytes()));
+	}
+
+	private static String formatVulkanStagingCopies(long copies, long overflowCopies, long overflowBytes) {
+		return copies + " staging copies (incl. " + overflowCopies + " overflow, "
+				+ formatMib(overflowBytes) + ")";
 	}
 
 	private static void sampleRendererDetails() {

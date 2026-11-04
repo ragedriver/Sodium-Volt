@@ -5,6 +5,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.ragedriver.sodiumvolt.client.performance.AdaptivePerformanceController;
 import com.ragedriver.sodiumvolt.client.performance.VramPressureProtectionEngine;
 import com.ragedriver.sodiumvolt.client.inspector.VoltInspectorEngine;
+import com.ragedriver.sodiumvolt.client.inspector.VulkanChunkUploadProfiler;
 import com.ragedriver.sodiumvolt.client.recovery.VoltRecoveryEngine;
 import com.ragedriver.sodiumvolt.client.watchdog.GpuTimeoutWatchdogEngine;
 import net.minecraft.client.Minecraft;
@@ -37,6 +38,7 @@ public abstract class MinecraftRenderMixin {
 			GpuTimeoutWatchdogEngine.refreshRenderContext(minecraft, System.nanoTime());
 		}
 		VoltInspectorEngine.publishStatisticsDemand(minecraft);
+		VulkanChunkUploadProfiler.beginFrame(minecraft, renderLevel);
 	}
 
 	@Inject(method = "renderFrame(Z)V", at = @At("TAIL"))
@@ -44,6 +46,7 @@ public abstract class MinecraftRenderMixin {
 			boolean renderLevel,
 			CallbackInfo callbackInfo
 	) {
+		VulkanChunkUploadProfiler.endFrame();
 		boolean recovery = VoltRecoveryEngine.requiresRenderFrameTimestamp();
 		boolean adaptive = AdaptivePerformanceController.requiresRenderFrameTimestamp();
 		boolean vram = VramPressureProtectionEngine.requiresRenderFrameTimestamp();

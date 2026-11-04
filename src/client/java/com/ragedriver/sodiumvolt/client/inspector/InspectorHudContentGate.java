@@ -45,6 +45,7 @@ record InspectorHudContentKey(
 		Object shield,
 		Object frameTimes,
 		Object chunks,
+		Object vulkanUploads,
 		Object scene,
 		Object particles,
 		Object scheduler,

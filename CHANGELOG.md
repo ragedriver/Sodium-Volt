@@ -1,5 +1,21 @@
 # Sodium Volt Changelog
 
+## 1.0.6+mc26.3
+
+### Fixes
+
+- Fixed Volt Tuner presets overwriting manual edits staged in the same Apply. Volt controls refresh immediately to reflect the saved settings.
+- Aligned the linked VRAM, GPU Timeout Watchdog, and block-entity distance sliders with their saved bounds. Fixed valid paired Adaptive Performance Controller render-distance edits losing one value.
+- Added restart guidance when VRAM Pressure Protection lacks a complete startup allocation baseline, including when enabled by the Aggressive preset.
+
+### Performance Improvements
+
+- Reclaimed deleted slots in the Block Entity Render-budgeting cache to reduce lookup work after repeated evictions.
+
+### Diagnostics
+
+- Added Vulkan terrain upload profiling to Volt Inspector when the HUD is visible in a world and Chunk Activity is enabled. It shows upload wall time, render duration, and staging copy counts, with overflow counts and bytes reported separately.
+
 ## 1.0.5+mc26.3
 
 ### Performance Improvements
